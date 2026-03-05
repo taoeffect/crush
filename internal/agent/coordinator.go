@@ -377,7 +377,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	disableAutoSummarize, disableContextStatus := compactionFlags(c.cfg.Options.CompactionMethod, c.cfg.Options.DisableAutoSummarize)
 
 	result := NewSessionAgent(SessionAgentOptions{
-		LargeModel:           large,
+		LargeModel:           primary,
 		SmallModel:           small,
 		SystemPromptPrefix:   primaryProviderCfg.SystemPromptPrefix,
 		SystemPrompt:         "",
