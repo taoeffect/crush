@@ -1043,7 +1043,6 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		for _, tr := range msg.ToolResults() {
 			toolItem := m.chat.MessageItem(tr.ToolCallID)
 			if toolItem == nil {
-				// we should have an item!
 				continue
 			}
 			if toolMsgItem, ok := toolItem.(chat.ToolMessageItem); ok {
@@ -1167,8 +1166,6 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 		if agent, ok := item.(chat.NestedToolContainer); ok {
 			if toolMessageItem, ok := item.(chat.ToolMessageItem); ok {
 				if toolMessageItem.ToolCall().ID == toolCallID {
-					// Verify this agent belongs to the correct parent message.
-					// We can't directly check parentMessageID on the item, so we trust the session parsing.
 					agentItem = agent
 					break
 				}

@@ -1059,12 +1059,101 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.NewTextErrorResponse("error generating response"), nil
 	}
 
+	resultText := subAgentResultText(result)
+
+	// When the fantasy AgentResult has no text (common when the
+	// provider's final step produces output tokens but no text
+	// content), fall back to reading the sub-agent's persisted
+	// session messages directly.
+	if resultText == "" {
+		if msgText, msgErr := c.subAgentResultFromMessages(ctx, session.ID); msgErr == nil && msgText != "" {
+			resultText = msgText
+		}
+	}
+
 	// Update parent session cost
 	if err := c.updateParentSessionCost(ctx, session.ID, params.SessionID); err != nil {
 		return fantasy.ToolResponse{}, err
 	}
 
-	return fantasy.NewTextResponse(result.Response.Content.Text()), nil
+	return fantasy.NewTextResponse(resultText), nil
+}
+
+// subAgentResultText extracts text from a sub-agent result. It checks the
+// final step first (normal case), then falls back to scanning all steps in
+// reverse for any text content. When no step has text (e.g. provider drops
+// the final response), it concatenates tool result output as a last resort.
+func subAgentResultText(result *fantasy.AgentResult) string {
+	if result == nil {
+		return ""
+	}
+
+	// Fast path: last step has text (normal case).
+	if text := result.Response.Content.Text(); text != "" {
+		return text
+	}
+
+	// Fallback: scan all steps in reverse for text content.
+	for i := len(result.Steps) - 1; i >= 0; i-- {
+		if text := result.Steps[i].Content.Text(); text != "" {
+			return text
+		}
+	}
+
+	// Last resort: extract tool result text from all steps. Some providers
+	// produce a final step with output tokens but no text content (e.g.
+	// refusal tokens silently dropped by the provider adapter), leaving
+	// the tool results as the only useful output.
+	var b strings.Builder
+	for _, step := range result.Steps {
+		for _, tr := range step.Content.ToolResults() {
+			text, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](tr.Result)
+			if ok && text.Text != "" {
+				if b.Len() > 0 {
+					b.WriteString("\n\n")
+				}
+				b.WriteString(text.Text)
+			}
+		}
+	}
+	return b.String()
+}
+
+// subAgentResultFromMessages reads the sub-agent's persisted session
+// messages and builds a result string. It collects the last assistant
+// text and all tool result contents, which reliably exist even when the
+// fantasy StepResult has no text (provider drops the final response).
+func (c *coordinator) subAgentResultFromMessages(ctx context.Context, sessionID string) (string, error) {
+	msgs, err := c.messages.List(ctx, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("list sub-agent messages: %w", err)
+	}
+
+	// Walk messages in reverse to find the last assistant text.
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.Assistant {
+			if text := msgs[i].Content().Text; text != "" {
+				return text, nil
+			}
+		}
+	}
+
+	// No assistant text found — collect tool result contents as fallback.
+	var b strings.Builder
+	for i := range msgs {
+		if msgs[i].Role != message.Tool {
+			continue
+		}
+		for _, tr := range msgs[i].ToolResults() {
+			if tr.Content != "" && !tr.IsError {
+				if b.Len() > 0 {
+					b.WriteString("\n\n")
+				}
+				b.WriteString(tr.Content)
+			}
+		}
+	}
+	return b.String(), nil
 }
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.
