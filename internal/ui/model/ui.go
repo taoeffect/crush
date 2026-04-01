@@ -1751,11 +1751,17 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 			switch {
 			case key.Matches(msg, m.keyMap.Editor.AddImage):
+				if !m.currentModelSupportsImages() {
+					break
+				}
 				if cmd := m.openFilesDialog(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 
 			case key.Matches(msg, m.keyMap.Editor.PasteImage):
+				if !m.currentModelSupportsImages() {
+					break
+				}
 				cmds = append(cmds, m.pasteImageFromClipboard)
 
 			case key.Matches(msg, m.keyMap.Editor.SendMessage):
@@ -2288,15 +2294,15 @@ func (m *UI) FullHelp() [][]key.Binding {
 
 		switch m.focus {
 		case uiFocusEditor:
-			binds = append(binds,
-				[]key.Binding{
-					k.Editor.Newline,
-					k.Editor.AddImage,
-					k.Editor.PasteImage,
-					k.Editor.MentionFile,
-					k.Editor.OpenEditor,
-				},
-			)
+			editorBinds := []key.Binding{
+				k.Editor.Newline,
+				k.Editor.MentionFile,
+				k.Editor.OpenEditor,
+			}
+			if m.currentModelSupportsImages() {
+				editorBinds = append(editorBinds, k.Editor.AddImage, k.Editor.PasteImage)
+			}
+			binds = append(binds, editorBinds)
 			if hasAttachments {
 				binds = append(binds,
 					[]key.Binding{
@@ -2338,14 +2344,16 @@ func (m *UI) FullHelp() [][]key.Binding {
 					k.Models,
 					k.Sessions,
 				},
-				[]key.Binding{
-					k.Editor.Newline,
-					k.Editor.AddImage,
-					k.Editor.PasteImage,
-					k.Editor.MentionFile,
-					k.Editor.OpenEditor,
-				},
 			)
+			editorBinds := []key.Binding{
+				k.Editor.Newline,
+				k.Editor.MentionFile,
+				k.Editor.OpenEditor,
+			}
+			if m.currentModelSupportsImages() {
+				editorBinds = append(editorBinds, k.Editor.AddImage, k.Editor.PasteImage)
+			}
+			binds = append(binds, editorBinds)
 			if hasAttachments {
 				binds = append(binds,
 					[]key.Binding{
@@ -2366,6 +2374,19 @@ func (m *UI) FullHelp() [][]key.Binding {
 	)
 
 	return binds
+}
+
+func (m *UI) currentModelSupportsImages() bool {
+	cfg := m.com.Config()
+	if cfg == nil {
+		return false
+	}
+	agentCfg, ok := cfg.Agents[config.AgentCoder]
+	if !ok {
+		return false
+	}
+	model := cfg.GetModelByType(agentCfg.Model)
+	return model != nil && model.SupportsImages
 }
 
 // toggleCompactMode toggles compact mode between uiChat and uiChatCompact states.
