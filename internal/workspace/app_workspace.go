@@ -264,6 +264,10 @@ func (w *AppWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
 	return w.store.SetCompactMode(scope, enabled)
 }
 
+func (w *AppWorkspace) SetCompactionMethod(scope config.Scope, method config.CompactionMethod) error {
+	return w.store.SetCompactionMethod(scope, method)
+}
+
 func (w *AppWorkspace) SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error {
 	return w.store.SetProviderAPIKey(scope, providerID, apiKey)
 }

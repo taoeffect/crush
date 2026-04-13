@@ -415,6 +415,14 @@ func (w *ClientWorkspace) SetCompactMode(scope config.Scope, enabled bool) error
 	return err
 }
 
+func (w *ClientWorkspace) SetCompactionMethod(scope config.Scope, method config.CompactionMethod) error {
+	err := w.client.SetConfigField(context.Background(), w.workspaceID(), scope, "options.compaction_method", method)
+	if err == nil {
+		w.refreshWorkspace()
+	}
+	return err
+}
+
 func (w *ClientWorkspace) SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error {
 	err := w.client.SetProviderAPIKey(context.Background(), w.workspaceID(), scope, providerID, apiKey)
 	if err == nil {

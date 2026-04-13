@@ -1521,13 +1521,13 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			break
 		}
 
-		if err := m.com.Store().SetCompactionMethod(config.ScopeGlobal, config.CompactionMethod(msg.Method)); err != nil {
+		if err := m.com.Workspace.SetCompactionMethod(config.ScopeGlobal, config.CompactionMethod(msg.Method)); err != nil {
 			cmds = append(cmds, util.ReportError(fmt.Errorf("failed to persist compaction method: %w", err)))
 			break
 		}
 
 		cmds = append(cmds, func() tea.Msg {
-			m.com.App.UpdateAgentModel(context.TODO())
+			m.com.Workspace.UpdateAgentModel(context.TODO())
 			label := "Auto-compaction"
 			if msg.Method == string(config.CompactionLLM) {
 				label = "LLM/User-driven compaction"
