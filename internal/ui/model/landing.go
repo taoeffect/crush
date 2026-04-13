@@ -1,17 +1,19 @@
 package model
 
 import (
+	"image"
+
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/ui/common"
+	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/charmbracelet/ultraviolet/layout"
 )
 
 // selectedLargeModel returns the currently selected large language model from
 // the agent coordinator, if one exists.
-func (m *UI) selectedLargeModel() *agent.Model {
-	if m.com.App.AgentCoordinator != nil {
-		model := m.com.App.AgentCoordinator.Model()
+func (m *UI) selectedLargeModel() *workspace.AgentModel {
+	if m.com.Workspace.AgentIsReady() {
+		model := m.com.Workspace.AgentModel()
 		return &model
 	}
 	return nil
@@ -22,7 +24,7 @@ func (m *UI) selectedLargeModel() *agent.Model {
 func (m *UI) landingView() string {
 	t := m.com.Styles
 	width := m.layout.main.Dx()
-	cwd := common.PrettyPath(t, m.com.Store().WorkingDir(), width)
+	cwd := common.PrettyPath(t, m.com.Workspace.WorkingDir(), width)
 
 	parts := []string{
 		cwd,
@@ -31,7 +33,11 @@ func (m *UI) landingView() string {
 	parts = append(parts, "", m.modelInfo(width))
 	infoSection := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
-	_, remainingHeightArea := layout.SplitVertical(m.layout.main, layout.Fixed(lipgloss.Height(infoSection)+1))
+	var remainingHeightArea image.Rectangle
+	layout.Vertical(
+		layout.Len(lipgloss.Height(infoSection)+1),
+		layout.Fill(1),
+	).Split(m.layout.main).Assign(new(image.Rectangle), &remainingHeightArea)
 
 	mcpLspSectionWidth := min(30, (width-1)/2)
 

@@ -3,6 +3,7 @@ package model
 import (
 	"cmp"
 	"fmt"
+	"image"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -48,7 +49,11 @@ func (m *UI) modelInfo(width int) string {
 			ModelContext: model.CatwalkCfg.ContextWindow,
 		}
 	}
-	return common.ModelInfo(m.com.Styles, model.CatwalkCfg.Name, providerName, reasoningInfo, modelContext, width)
+	var modelName string
+	if model != nil {
+		modelName = model.CatwalkCfg.Name
+	}
+	return common.ModelInfo(m.com.Styles, modelName, providerName, reasoningInfo, modelContext, width)
 }
 
 // getDynamicHeightLimits will give us the num of items to show in each section based on the hight
@@ -112,7 +117,7 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 	height := area.Dy()
 
 	title := t.Muted.Width(width).MaxHeight(2).Render(m.session.Title)
-	cwd := common.PrettyPath(t, m.com.Store().WorkingDir(), width)
+	cwd := common.PrettyPath(t, m.com.Workspace.WorkingDir(), width)
 	sidebarLogo := m.sidebarLogo
 	if height < logoHeightBreakpoint {
 		sidebarLogo = logo.SmallRender(m.com.Styles, width)
@@ -132,13 +137,17 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 		blocks...,
 	)
 
-	_, remainingHeightArea := layout.SplitVertical(m.layout.sidebar, layout.Fixed(lipgloss.Height(sidebarHeader)))
+	var remainingHeightArea image.Rectangle
+	layout.Vertical(
+		layout.Len(lipgloss.Height(sidebarHeader)),
+		layout.Fill(1),
+	).Split(m.layout.sidebar).Assign(new(image.Rectangle), &remainingHeightArea)
 	remainingHeight := remainingHeightArea.Dy() - 10
 	maxFiles, maxLSPs, maxMCPs := getDynamicHeightLimits(remainingHeight)
 
 	lspSection := m.lspInfo(width, maxLSPs, true)
 	mcpSection := m.mcpInfo(width, maxMCPs, true)
-	filesSection := m.filesInfo(m.com.Store().WorkingDir(), width, maxFiles, true)
+	filesSection := m.filesInfo(m.com.Workspace.WorkingDir(), width, maxFiles, true)
 
 	uv.NewStyledString(
 		lipgloss.NewStyle().

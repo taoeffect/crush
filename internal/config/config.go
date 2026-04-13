@@ -224,8 +224,7 @@ func (c Completions) Limits() (depth, items int) {
 }
 
 type Permissions struct {
-	AllowedTools []string `json:"allowed_tools,omitempty" jsonschema:"description=List of tools that don't require permission prompts,example=bash,example=view"` // Tools that don't require permission prompts
-	SkipRequests bool     `json:"-"`                                                                                                                              // Automatically accept all permissions (YOLO mode)
+	AllowedTools []string `json:"allowed_tools,omitempty" jsonschema:"description=List of tools that don't require permission prompts,example=bash,example=view"`
 }
 
 type TrailerStyle string
@@ -252,7 +251,7 @@ func (Attribution) JSONSchemaExtend(schema *jsonschema.Schema) {
 }
 
 type Options struct {
-	ContextPaths              []string         `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
+ContextPaths              []string         `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
 	SkillsPaths               []string         `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
 	TUI                       *TUIOptions      `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
 	Debug                     bool             `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
@@ -269,6 +268,7 @@ type Options struct {
 	Progress                  *bool            `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	CompactionMethod          CompactionMethod `json:"compaction_method,omitempty" jsonschema:"description=Controls how context compaction is handled. 'auto' uses backend-managed summarization. 'llm' enables LLM/user-driven compaction via context status injection.,default=auto,enum=auto,enum=llm"`
 	DisableNotifications      bool             `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
+	DisabledSkills            []string         `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
 }
 
 type MCPs map[string]MCPConfig
@@ -474,6 +474,8 @@ func allToolNames() []string {
 	return []string{
 		"agent",
 		"bash",
+		"crush_info",
+		"crush_logs",
 		"job_output",
 		"job_kill",
 		"download",
