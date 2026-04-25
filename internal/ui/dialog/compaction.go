@@ -283,8 +283,8 @@ func (ci *CompactionItem) Render(width int) string {
 	s := ListItemStyles{
 		ItemBlurred:     ci.t.Dialog.NormalItem,
 		ItemFocused:     ci.t.Dialog.SelectedItem,
-		InfoTextBlurred: ci.t.Base,
-		InfoTextFocused: ci.t.Base,
+		InfoTextBlurred: ci.t.Dialog.ListItem.InfoBlurred,
+		InfoTextFocused: ci.t.Dialog.ListItem.InfoFocused,
 	}
 	return renderItem(s, ci.title, info, ci.focused, width, ci.cache, &ci.m)
 }
