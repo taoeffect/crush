@@ -1101,9 +1101,10 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 	return cmd
 }
 
-// updateSessionMessage updates an existing message in the current session in the chat
-// when an assistant message is updated it may include updated tool calls as well
-// that is why we need to handle creating/updating each tool call message too
+// updateSessionMessage updates an existing message in the current session in
+// the chat when an assistant message is updated it may include updated tool
+// calls as well that is why we need to handle creating/updating each tool call
+// message too.
 func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 	var cmds []tea.Cmd
 	existingItem := m.chat.MessageItem(msg.ID)
@@ -1115,15 +1116,21 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 	}
 
 	shouldRenderAssistant := chat.ShouldRenderAssistantMessage(&msg)
-	// if the message of the assistant does not have any  response just tool calls we need to remove it
+	isEndTurn := msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn
+	// If the message of the assistant does not have any response just tool
+	// calls we need to remove it, but keep the info item for end-of-turn
+	// renders so the footer (model/provider/duration) remains visible when,
+	// for example, a hook halts the turn.
 	if !shouldRenderAssistant && len(msg.ToolCalls()) > 0 && existingItem != nil {
 		m.chat.RemoveMessage(msg.ID)
-		if infoItem := m.chat.MessageItem(chat.AssistantInfoID(msg.ID)); infoItem != nil {
-			m.chat.RemoveMessage(chat.AssistantInfoID(msg.ID))
+		if !isEndTurn {
+			if infoItem := m.chat.MessageItem(chat.AssistantInfoID(msg.ID)); infoItem != nil {
+				m.chat.RemoveMessage(chat.AssistantInfoID(msg.ID))
+			}
 		}
 	}
 
-	if shouldRenderAssistant && msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
+	if isEndTurn {
 		if infoItem := m.chat.MessageItem(chat.AssistantInfoID(msg.ID)); infoItem == nil {
 			newInfoItem := chat.NewAssistantInfoItem(m.com.Styles, &msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
 			m.chat.AppendMessages(newInfoItem)
@@ -1542,6 +1549,37 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			return util.NewInfoMsg("Compaction method set to " + label)
 		})
 		m.dialog.CloseDialog(dialog.CompactionID)
+	case dialog.ActionSelectSearchEngine:
+		cfg := m.com.Config()
+		if cfg == nil {
+			cmds = append(cmds, util.ReportError(errors.New("configuration not found")))
+			break
+		}
+		if msg.Engine == config.SearchEngineKagi && cfg.Tools.WebSearch.ResolvedKagiAPIKey(m.com.Workspace.Resolver()) == "" {
+			m.dialog.CloseDialog(dialog.SearchEnginesID)
+			if cmd := m.openKagiAPIKeyInputDialog(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			break
+		}
+		if err := m.saveSearchEngine(msg.Engine); err != nil {
+			cmds = append(cmds, util.ReportError(err))
+			break
+		}
+		m.dialog.CloseDialog(dialog.SearchEnginesID)
+		cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Search engine set to "+searchEngineDisplayName(msg.Engine))))
+	case dialog.ActionSaveKagiAPIKey:
+		if err := m.com.Workspace.SetConfigField(config.ScopeGlobal, "tools.web_search.kagi_api_key", msg.APIKey); err != nil {
+			cmds = append(cmds, util.ReportError(err))
+			break
+		}
+		if err := m.saveSearchEngine(config.SearchEngineKagi); err != nil {
+			cmds = append(cmds, util.ReportError(err))
+			break
+		}
+		m.dialog.CloseDialog(dialog.KagiAPIKeyInputID)
+		m.dialog.CloseDialog(dialog.SearchEnginesID)
+		cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Search engine set to Kagi")))
 	case dialog.ActionPermissionResponse:
 		m.dialog.CloseDialog(dialog.PermissionsID)
 		switch msg.Action {
@@ -3043,8 +3081,7 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 				return newSessionMsg{Summary: nse.Summary}
 			}
 			isCancelErr := errors.Is(err, context.Canceled)
-			isPermissionErr := errors.Is(err, permission.ErrorPermissionDenied)
-			if isCancelErr || isPermissionErr {
+			if isCancelErr {
 				return nil
 			}
 			return util.InfoMsg{
@@ -3121,6 +3158,14 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		}
 	case dialog.CompactionID:
 		if cmd := m.openCompactionDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.SearchEnginesID:
+		if cmd := m.openSearchEnginesDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.KagiAPIKeyInputID:
+		if cmd := m.openKagiAPIKeyInputDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.FilePickerID:
@@ -3222,6 +3267,50 @@ func (m *UI) openCompactionDialog() tea.Cmd {
 	compactionDialog := dialog.NewCompaction(m.com)
 	m.dialog.OpenDialog(compactionDialog)
 	return nil
+}
+
+func (m *UI) openSearchEnginesDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.SearchEnginesID) {
+		m.dialog.BringToFront(dialog.SearchEnginesID)
+		return nil
+	}
+
+	searchEnginesDialog, err := dialog.NewSearchEngines(m.com)
+	if err != nil {
+		return util.ReportError(err)
+	}
+
+	m.dialog.OpenDialog(searchEnginesDialog)
+	return nil
+}
+
+func (m *UI) openKagiAPIKeyInputDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.KagiAPIKeyInputID) {
+		m.dialog.BringToFront(dialog.KagiAPIKeyInputID)
+		return nil
+	}
+
+	kagiAPIKeyInputDialog, cmd := dialog.NewKagiAPIKeyInput(m.com)
+	m.dialog.OpenDialog(kagiAPIKeyInputDialog)
+	return cmd
+}
+
+func (m *UI) saveSearchEngine(engine config.SearchEngine) error {
+	if !engine.Valid() {
+		return fmt.Errorf("invalid search engine: %s", engine)
+	}
+	return m.com.Workspace.SetConfigField(config.ScopeGlobal, "tools.web_search.search_engine", engine.String())
+}
+
+func searchEngineDisplayName(engine config.SearchEngine) string {
+	switch engine {
+	case config.SearchEngineKagi:
+		return "Kagi"
+	case config.SearchEngineDuckDuckGo:
+		return "DuckDuckGo"
+	default:
+		return engine.String()
+	}
 }
 
 // openSessionsDialog opens the sessions dialog. If the dialog is already open,

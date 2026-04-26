@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -357,9 +358,56 @@ type Agent struct {
 	ContextPaths []string `json:"context_paths,omitempty"`
 }
 
+type SearchEngine string
+
+const (
+	SearchEngineDuckDuckGo SearchEngine = "duckduckgo"
+	SearchEngineKagi       SearchEngine = "kagi"
+)
+
+func (s SearchEngine) String() string {
+	return string(s)
+}
+
+func (s SearchEngine) Valid() bool {
+	switch s {
+	case SearchEngineDuckDuckGo, SearchEngineKagi:
+		return true
+	default:
+		return false
+	}
+}
+
 type Tools struct {
-	Ls   ToolLs   `json:"ls,omitzero"`
-	Grep ToolGrep `json:"grep,omitzero"`
+	Ls        ToolLs        `json:"ls,omitzero"`
+	Grep      ToolGrep      `json:"grep,omitzero"`
+	WebSearch ToolWebSearch `json:"web_search,omitzero" jsonschema:"description=Web search tool configuration"`
+}
+
+type ToolWebSearch struct {
+	SearchEngine SearchEngine `json:"search_engine,omitempty" jsonschema:"description=Default search engine for web_search,enum=duckduckgo,enum=kagi,default=duckduckgo"`
+	KagiAPIKey   string       `json:"kagi_api_key,omitempty" jsonschema:"description=Kagi Search API key or environment variable reference,example=$KAGI_API_KEY"`
+}
+
+func (t ToolWebSearch) Engine() SearchEngine {
+	if t.SearchEngine.Valid() {
+		return t.SearchEngine
+	}
+	return SearchEngineDuckDuckGo
+}
+
+func (t ToolWebSearch) ResolvedKagiAPIKey(resolver VariableResolver) string {
+	if t.KagiAPIKey == "" {
+		return ""
+	}
+	if resolver == nil {
+		return t.KagiAPIKey
+	}
+	resolved, err := resolver.ResolveValue(t.KagiAPIKey)
+	if err != nil {
+		return ""
+	}
+	return resolved
 }
 
 type ToolLs struct {
@@ -379,6 +427,35 @@ type ToolGrep struct {
 // GetTimeout returns the user-defined timeout or the default.
 func (t ToolGrep) GetTimeout() time.Duration {
 	return ptrValOr(t.Timeout, 5*time.Second)
+}
+
+// HookConfig defines a user-configured shell command that fires on a hook
+// event (e.g. PreToolUse).
+type HookConfig struct {
+	// Regex pattern tested against the tool name. Empty means match all.
+	Matcher string `json:"matcher,omitempty" jsonschema:"description=Regex pattern tested against the tool name. Empty means match all tools."`
+	// Shell command to execute.
+	Command string `json:"command" jsonschema:"required,description=Shell command to execute when the hook fires"`
+	// Timeout in seconds. Default 30.
+	Timeout int `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for the hook command,default=30"`
+
+	// Compiled matcher regex. Not serialized.
+	matcherRegex *regexp.Regexp
+}
+
+// MatcherRegex returns the compiled matcher regex, or nil if no matcher is
+// set.
+func (h *HookConfig) MatcherRegex() *regexp.Regexp {
+	return h.matcherRegex
+}
+
+// TimeoutDuration returns the hook timeout as a time.Duration, defaulting
+// to 30s.
+func (h *HookConfig) TimeoutDuration() time.Duration {
+	if h.Timeout <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(h.Timeout) * time.Second
 }
 
 // Config holds the configuration for crush.
@@ -403,6 +480,8 @@ type Config struct {
 	Permissions *Permissions `json:"permissions,omitempty" jsonschema:"description=Permission settings for tool usage"`
 
 	Tools Tools `json:"tools,omitzero" jsonschema:"description=Tool configurations"`
+
+	Hooks map[string][]HookConfig `json:"hooks,omitempty" jsonschema:"description=User-defined shell commands that fire on hook events (e.g. PreToolUse)"`
 
 	Agents map[string]Agent `json:"-"`
 }

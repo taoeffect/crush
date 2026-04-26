@@ -95,7 +95,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				return fantasy.ToolResponse{}, err
 			}
 			if !p {
-				return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
+				return tools.NewPermissionDeniedResponse(), nil
 			}
 
 			tmpDir, err := os.MkdirTemp(c.cfg.Config().Options.DataDirectory, "crush-fetch-*")
@@ -161,8 +161,12 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				return fantasy.ToolResponse{}, errors.New("small model provider not configured")
 			}
 
+			webSearchConfig := c.cfg.Config().Tools.WebSearch
 			webFetchTool := tools.NewWebFetchTool(tmpDir, client)
-			webSearchTool := tools.NewWebSearchTool(client)
+			webSearchTool := tools.NewWebSearchTool(client, tools.WebSearchOptions{
+				DefaultEngine: webSearchConfig.Engine(),
+				KagiAPIKey:    webSearchConfig.ResolvedKagiAPIKey(c.cfg.Resolver()),
+			})
 			fetchTools := []fantasy.AgentTool{
 				webFetchTool,
 				webSearchTool,
@@ -171,6 +175,11 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				tools.NewSourcegraphTool(client),
 				tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, nil, tmpDir),
 			}
+
+			// Sub-agent tools run without hook interception. The top-level
+			// `agentic_fetch` call itself is already wrapped from the coder's
+			// side; firing hooks again for every inner tool call would run
+			// the user's hooks N times per delegated turn.
 
 			agent := NewSessionAgent(SessionAgentOptions{
 				LargeModel:           small, // Use small model for both (fetch doesn't need large)

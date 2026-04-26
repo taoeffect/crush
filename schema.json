@@ -89,12 +89,44 @@
         "tools": {
           "$ref": "#/$defs/Tools",
           "description": "Tool configurations"
+        },
+        "hooks": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/$defs/HookConfig"
+            },
+            "type": "array"
+          },
+          "type": "object",
+          "description": "User-defined shell commands that fire on hook events (e.g. PreToolUse)"
         }
       },
       "additionalProperties": false,
       "type": "object",
       "required": [
         "tools"
+      ]
+    },
+    "HookConfig": {
+      "properties": {
+        "matcher": {
+          "type": "string",
+          "description": "Regex pattern tested against the tool name. Empty means match all tools."
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute when the hook fires"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout in seconds for the hook command",
+          "default": 30
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "command"
       ]
     },
     "LSPConfig": {
@@ -737,6 +769,28 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "ToolWebSearch": {
+      "properties": {
+        "search_engine": {
+          "type": "string",
+          "enum": [
+            "duckduckgo",
+            "kagi"
+          ],
+          "description": "Default search engine for web_search",
+          "default": "duckduckgo"
+        },
+        "kagi_api_key": {
+          "type": "string",
+          "description": "Kagi Search API key or environment variable reference",
+          "examples": [
+            "$KAGI_API_KEY"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "Tools": {
       "properties": {
         "ls": {
@@ -744,13 +798,18 @@
         },
         "grep": {
           "$ref": "#/$defs/ToolGrep"
+        },
+        "web_search": {
+          "$ref": "#/$defs/ToolWebSearch",
+          "description": "Web search tool configuration"
         }
       },
       "additionalProperties": false,
       "type": "object",
       "required": [
         "ls",
-        "grep"
+        "grep",
+        "web_search"
       ]
     }
   }
