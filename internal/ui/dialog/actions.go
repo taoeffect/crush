@@ -68,6 +68,7 @@ type (
 	}
 	ActionSelectSearchEngine struct {
 		Engine config.SearchEngine
+		Edit   bool
 	}
 	ActionSaveKagiAPIKey struct {
 		APIKey string
@@ -100,7 +101,8 @@ type (
 // Messages for API key input dialog.
 type (
 	ActionChangeAPIKeyState struct {
-		State APIKeyInputState
+		State  APIKeyInputState
+		APIKey string
 	}
 )
 
