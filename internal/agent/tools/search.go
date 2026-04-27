@@ -292,19 +292,23 @@ var (
 	lastSearchTime time.Time
 )
 
-// maybeDelaySearch adds a random delay if the last search was recent.
+// maybeDelaySearch reserves the next allowed DuckDuckGo request time under the
+// mutex, then sleeps outside the lock. This keeps concurrent DuckDuckGo
+// searches spaced apart without blocking Kagi or other engines that do not use
+// this scraper-specific throttle.
 func maybeDelaySearch() {
 	minGap := time.Duration(500+rand.IntN(1500)) * time.Millisecond
 
 	lastSearchMu.Lock()
-	delay := minGap - time.Since(lastSearchTime)
+	now := time.Now()
+	if lastSearchTime.Before(now) {
+		lastSearchTime = now
+	}
+	delay := lastSearchTime.Sub(now)
+	lastSearchTime = lastSearchTime.Add(minGap)
 	lastSearchMu.Unlock()
 
 	if delay > 0 {
 		time.Sleep(delay)
 	}
-
-	lastSearchMu.Lock()
-	lastSearchTime = time.Now()
-	lastSearchMu.Unlock()
 }
