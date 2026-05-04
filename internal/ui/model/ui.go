@@ -25,6 +25,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -151,6 +152,11 @@ type (
 	sessionFilesUpdatesMsg struct {
 		sessionFiles []SessionFile
 	}
+	// creditsUpdatedMsg is sent when the remaining Hyper credits have been
+	// fetched from the API.
+	creditsUpdatedMsg struct {
+		credits int
+	}
 )
 
 // UI represents the main user interface model.
@@ -263,6 +269,9 @@ type UI struct {
 
 	// mouse highlighting related state
 	lastClickTime time.Time
+
+	// hyperCredits is the remaining Hyper credits, updated after each prompt.
+	hyperCredits *int
 
 	// Prompt history for up/down navigation through previous messages.
 	promptHistory struct {
@@ -385,6 +394,9 @@ func (m *UI) Init() tea.Cmd {
 	// load initial session if specified
 	if cmd := m.loadInitialSession(); cmd != nil {
 		cmds = append(cmds, cmd)
+	}
+	if m.com.IsHyper() {
+		cmds = append(cmds, m.fetchHyperCredits())
 	}
 	return tea.Batch(cmds...)
 }
@@ -863,6 +875,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.handleSelectModel(msg.action); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case creditsUpdatedMsg:
+		m.hyperCredits = &msg.credits
 	case util.InfoMsg:
 		if msg.Type == util.InfoTypeError {
 			slog.Error("Error reported", "error", msg.Msg)
@@ -872,6 +886,18 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if ttl <= 0 {
 			ttl = DefaultStatusTTL
 		}
+		cmds = append(cmds, clearInfoMsgCmd(ttl))
+	case app.UpdateAvailableMsg:
+		text := fmt.Sprintf("Crush update available: v%s → v%s.", msg.CurrentVersion, msg.LatestVersion)
+		if msg.IsDevelopment {
+			text = fmt.Sprintf("This is a development version of Crush. The latest version is v%s.", msg.LatestVersion)
+		}
+		ttl := 10 * time.Second
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeUpdate,
+			Msg:  text,
+			TTL:  ttl,
+		})
 		cmds = append(cmds, clearInfoMsgCmd(ttl))
 	case util.ClearStatusMsg:
 		m.status.ClearInfoMsg()
@@ -1623,6 +1649,33 @@ func (m *UI) refreshHyperAndRetrySelect(msg dialog.ActionSelectModel) tea.Cmd {
 	}
 }
 
+// fetchHyperCredits returns a command that asynchronously fetches the
+// remaining Hyper credits from the API.
+func (m *UI) fetchHyperCredits() tea.Cmd {
+	return func() tea.Msg {
+		cfg := m.com.Config()
+		if cfg == nil {
+			return nil
+		}
+		providerCfg, ok := cfg.Providers.Get(hyper.Name)
+		if !ok {
+			return nil
+		}
+		apiKey, err := m.com.Workspace.Resolver().ResolveValue(providerCfg.APIKey)
+		if err != nil || apiKey == "" {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		credits, err := hyper.FetchCredits(ctx, apiKey)
+		if err != nil {
+			slog.Error("Failed to fetch Hyper credits", "error", err)
+			return nil
+		}
+		return creditsUpdatedMsg{credits: credits}
+	}
+}
+
 // handleSelectModel performs the model selection after any provider
 // pre-checks (such as a silent Hyper OAuth refresh) have completed.
 func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
@@ -1704,6 +1757,8 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		if err := m.com.Workspace.InitCoderAgent(context.TODO()); err != nil {
 			cmds = append(cmds, util.ReportError(err))
 		}
+	} else if m.com.IsHyper() {
+		cmds = append(cmds, m.fetchHyperCredits())
 	}
 
 	return tea.Batch(cmds...)
@@ -2114,6 +2169,7 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		m.isCompact,
 		m.detailsOpen,
 		area.Dx(),
+		m.hyperCredits,
 	)
 }
 
@@ -3472,10 +3528,15 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 	switch n.Type {
 	case notify.TypeAgentFinished:
-		return m.sendNotification(notification.Notification{
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.sendNotification(notification.Notification{
 			Title:   "Crush is waiting...",
 			Message: fmt.Sprintf("Agent's turn completed in \"%s\"", n.SessionTitle),
-		})
+		}))
+		if m.com.IsHyper() {
+			cmds = append(cmds, m.fetchHyperCredits())
+		}
+		return tea.Batch(cmds...)
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)
 	default:

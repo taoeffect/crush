@@ -5,9 +5,9 @@ go 1.26.2
 require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.6
-	charm.land/catwalk v0.37.16
+	charm.land/catwalk v0.39.1
 	charm.land/fang/v2 v2.0.1
-	charm.land/fantasy v0.21.1
+	charm.land/fantasy v0.23.0
 	charm.land/glamour/v2 v2.0.0
 	charm.land/lipgloss/v2 v2.0.3
 	charm.land/log/v2 v2.0.0
@@ -89,7 +89,7 @@ require (
 	github.com/KyleBanks/depth v1.2.1 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.41.6 // indirect
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.9 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.32.16 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.15 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.22 // indirect
@@ -207,7 +207,7 @@ require (
 	golang.org/x/tools v0.44.0 // indirect
 	google.golang.org/api v0.276.0 // indirect
 	google.golang.org/genai v1.54.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260427160629-7cedc36a6bc4 // indirect
 	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/dnaeon/go-vcr.v4 v4.0.6-0.20251110073552-01de4eb40290 // indirect
