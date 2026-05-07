@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/crush/internal/home"
 	powernapConfig "github.com/charmbracelet/x/powernap/pkg/config"
 	"github.com/qjebbs/go-jsons"
+	"github.com/tidwall/gjson"
 )
 
 const defaultCatwalkURL = "https://catwalk.charm.land"
@@ -55,12 +56,9 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 
 	// Load workspace config last so it has highest priority.
 	if wsData, err := os.ReadFile(store.workspacePath); err == nil && len(wsData) > 0 {
-		merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
+		merged, mergeErr := loadWorkspaceOverride(cfg, wsData, workingDir, cfg.Options.DataDirectory)
 		if mergeErr == nil {
-			// Preserve defaults that setDefaults already applied.
-			dataDir := cfg.Options.DataDirectory
 			*cfg = *merged
-			cfg.setDefaults(workingDir, dataDir)
 			store.config = cfg
 			store.loadedPaths = append(store.loadedPaths, store.workspacePath)
 		}
@@ -132,6 +130,29 @@ func mustMarshalConfig(cfg *Config) []byte {
 		return []byte("{}")
 	}
 	return data
+}
+
+// loadWorkspaceOverride merges workspace config over the effective config while
+// preserving per-type recent_models override semantics for workspace arrays.
+func loadWorkspaceOverride(cfg *Config, wsData []byte, workingDir, dataDir string) (*Config, error) {
+	merged, err := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
+	if err != nil {
+		return nil, err
+	}
+	if gjson.GetBytes(wsData, "recent_models").Exists() {
+		var workspace Config
+		if err := json.Unmarshal(wsData, &workspace); err != nil {
+			return nil, err
+		}
+		if merged.RecentModels == nil {
+			merged.RecentModels = make(map[SelectedModelType][]SelectedModel)
+		}
+		for modelType, recentModels := range workspace.RecentModels {
+			merged.RecentModels[modelType] = normalizeRecentModels(recentModels)
+		}
+	}
+	merged.setDefaults(workingDir, dataDir)
+	return merged, nil
 }
 
 func PushPopCrushEnv() func() {
@@ -605,7 +626,11 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 		if model == nil {
 			large = defaultLarge
 			if persist {
-				if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeLarge, large); err != nil {
+				scope, ok := store.writableScopeForModel(SelectedModelTypeLarge)
+				if !ok {
+					slog.Warn("Skipping repair of invalid selected large model: not present in writable scope (workspace/global data)",
+						"provider", largeModelSelected.Provider, "model", largeModelSelected.Model)
+				} else if err := store.UpdatePreferredModel(scope, SelectedModelTypeLarge, large); err != nil {
 					return fmt.Errorf("failed to update preferred large model: %w", err)
 				}
 			}
@@ -649,7 +674,11 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 		if model == nil {
 			small = defaultSmall
 			if persist {
-				if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, small); err != nil {
+				scope, ok := store.writableScopeForModel(SelectedModelTypeSmall)
+				if !ok {
+					slog.Warn("Skipping repair of invalid selected small model: not present in writable scope (workspace/global data)",
+						"provider", smallModelSelected.Provider, "model", smallModelSelected.Model)
+				} else if err := store.UpdatePreferredModel(scope, SelectedModelTypeSmall, small); err != nil {
 					return fmt.Errorf("failed to update preferred small model: %w", err)
 				}
 			}
@@ -682,6 +711,17 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 	}
 	c.Models[SelectedModelTypeLarge] = large
 	c.Models[SelectedModelTypeSmall] = small
+	if persist {
+		// Drop recent_models entries whose provider/model is no longer
+		// resolvable. We do this here (after Load/ReloadFromDisk has
+		// finished merging config) rather than in the model dialog's
+		// render path, and we write to whichever scope (workspace or
+		// global) owns the recent_models entries — never widening to a
+		// non-writable scope.
+		if err := store.pruneInvalidRecentModels(); err != nil {
+			return fmt.Errorf("failed to prune invalid recent models: %w", err)
+		}
+	}
 	return nil
 }
 

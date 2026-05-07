@@ -260,6 +260,10 @@ func (w *AppWorkspace) UpdatePreferredModel(scope config.Scope, modelType config
 	return w.store.UpdatePreferredModel(scope, modelType, model)
 }
 
+func (w *AppWorkspace) SaveModelChoicesAsDefault() error {
+	return w.store.SaveModelChoicesAsDefault()
+}
+
 func (w *AppWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
 	return w.store.SetCompactMode(scope, enabled)
 }
@@ -274,6 +278,10 @@ func (w *AppWorkspace) SetProviderAPIKey(scope config.Scope, providerID string, 
 
 func (w *AppWorkspace) SetConfigField(scope config.Scope, key string, value any) error {
 	return w.store.SetConfigField(scope, key, value)
+}
+
+func (w *AppWorkspace) HasConfigField(scope config.Scope, key string) (bool, error) {
+	return w.store.HasConfigField(scope, key), nil
 }
 
 func (w *AppWorkspace) RemoveConfigField(scope config.Scope, key string) error {

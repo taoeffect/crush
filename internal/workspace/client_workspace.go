@@ -407,6 +407,14 @@ func (w *ClientWorkspace) UpdatePreferredModel(scope config.Scope, modelType con
 	return err
 }
 
+func (w *ClientWorkspace) SaveModelChoicesAsDefault() error {
+	err := w.client.SaveModelChoicesAsDefault(context.Background(), w.workspaceID())
+	if err == nil {
+		w.refreshWorkspace()
+	}
+	return err
+}
+
 func (w *ClientWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
 	err := w.client.SetCompactMode(context.Background(), w.workspaceID(), scope, enabled)
 	if err == nil {
@@ -437,6 +445,10 @@ func (w *ClientWorkspace) SetConfigField(scope config.Scope, key string, value a
 		w.refreshWorkspace()
 	}
 	return err
+}
+
+func (w *ClientWorkspace) HasConfigField(scope config.Scope, key string) (bool, error) {
+	return w.client.HasConfigField(context.Background(), w.workspaceID(), scope, key)
 }
 
 func (w *ClientWorkspace) RemoveConfigField(scope config.Scope, key string) error {

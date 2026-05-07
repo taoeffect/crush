@@ -1,14 +1,15 @@
 package config
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 
 	"charm.land/catwalk/pkg/catwalk"
 	hyperp "github.com/charmbracelet/crush/internal/agent/hyper"
@@ -26,6 +27,14 @@ type fileSnapshot struct {
 	Exists  bool
 	Size    int64
 	ModTime int64 // UnixNano
+}
+
+// configFileCacheEntry caches the raw bytes of a config file along with the
+// stat info used to detect changes.
+type configFileCacheEntry struct {
+	modTime int64 // UnixNano
+	size    int64
+	data    []byte
 }
 
 // RuntimeOverrides holds per-session settings that are never persisted to
@@ -51,6 +60,13 @@ type ConfigStore struct {
 	snapshots          map[string]fileSnapshot // path -> snapshot at last capture
 	autoReloadDisabled bool                    // set during load/reload to prevent re-entrancy
 	reloadInProgress   bool                    // set during reload to avoid disk writes mid-reload
+
+	// configFileCache caches raw config file bytes keyed by absolute path.
+	// Entries are validated against (size, mtime) on read; mismatches force
+	// a fresh ReadFile. SetConfigField*/RemoveConfigField invalidate the
+	// affected scope's entry.
+	configFileCacheMu sync.RWMutex
+	configFileCache   map[string]configFileCacheEntry
 }
 
 // Config returns the pure-data config struct (read-only after load).
@@ -109,6 +125,74 @@ func (s *ConfigStore) configPath(scope Scope) (string, error) {
 	}
 }
 
+// readCachedConfigFile reads the config file at path, returning cached bytes
+// when (size, mtime) match. Empty result with nil error means the file does
+// not exist. Callers must not mutate the returned slice.
+func (s *ConfigStore) readCachedConfigFile(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.configFileCacheMu.Lock()
+			delete(s.configFileCache, path)
+			s.configFileCacheMu.Unlock()
+			return nil, nil
+		}
+		return nil, err
+	}
+	s.configFileCacheMu.RLock()
+	entry, ok := s.configFileCache[path]
+	s.configFileCacheMu.RUnlock()
+	if ok && entry.size == info.Size() && entry.modTime == info.ModTime().UnixNano() {
+		return entry.data, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	s.configFileCacheMu.Lock()
+	if s.configFileCache == nil {
+		s.configFileCache = make(map[string]configFileCacheEntry)
+	}
+	s.configFileCache[path] = configFileCacheEntry{
+		modTime: info.ModTime().UnixNano(),
+		size:    info.Size(),
+		data:    data,
+	}
+	s.configFileCacheMu.Unlock()
+	return data, nil
+}
+
+// invalidateConfigFileCache drops the cache entry for the given scope's file.
+// Called after writes/removals to force the next read to refresh from disk.
+func (s *ConfigStore) invalidateConfigFileCache(scope Scope) {
+	path, err := s.configPath(scope)
+	if err != nil || path == "" {
+		return
+	}
+	s.configFileCacheMu.Lock()
+	delete(s.configFileCache, path)
+	s.configFileCacheMu.Unlock()
+}
+
+// writableScopeForModel returns the scope (workspace or global) whose data
+// file currently has `models.<modelType>` set, preferring workspace. Returns
+// ok=false when neither writable scope contains the key, indicating the
+// selection came from a non-writable location (e.g. a project-level
+// crush.json) and that callers should skip persistence.
+func (s *ConfigStore) writableScopeForModel(modelType SelectedModelType) (Scope, bool) {
+	key := fmt.Sprintf("models.%s", modelType)
+	if s.workspacePath != "" && s.HasConfigField(ScopeWorkspace, key) {
+		return ScopeWorkspace, true
+	}
+	if s.HasConfigField(ScopeGlobal, key) {
+		return ScopeGlobal, true
+	}
+	return ScopeGlobal, false
+}
+
 // HasConfigField checks whether a key exists in the config file for the given
 // scope.
 func (s *ConfigStore) HasConfigField(scope Scope, key string) bool {
@@ -116,20 +200,29 @@ func (s *ConfigStore) HasConfigField(scope Scope, key string) bool {
 	if err != nil {
 		return false
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, err := s.readCachedConfigFile(path)
+	if err != nil || len(data) == 0 {
 		return false
 	}
-	return gjson.Get(string(data), key).Exists()
+	return gjson.GetBytes(data, key).Exists()
 }
 
 // SetConfigField sets a key/value pair in the config file for the given scope.
 // After a successful write, it automatically reloads config to keep in-memory
 // state fresh.
 func (s *ConfigStore) SetConfigField(scope Scope, key string, value any) error {
+	return s.SetConfigFields(scope, map[string]any{key: value})
+}
+
+// SetConfigFields sets multiple key/value pairs in the config file for the given
+// scope in a single write. After a successful write, it automatically reloads
+// config to keep in-memory state fresh. This is preferred over multiple
+// SetConfigField calls when writing several fields atomically to avoid
+// intermediate reloads with partial state.
+func (s *ConfigStore) SetConfigFields(scope Scope, kv map[string]any) error {
 	path, err := s.configPath(scope)
 	if err != nil {
-		return fmt.Errorf("%s: %w", key, err)
+		return fmt.Errorf("%v: %w", kv, err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -140,9 +233,12 @@ func (s *ConfigStore) SetConfigField(scope Scope, key string, value any) error {
 		}
 	}
 
-	newValue, err := sjson.Set(string(data), key, value)
-	if err != nil {
-		return fmt.Errorf("failed to set config field %s: %w", key, err)
+	newValue := string(data)
+	for key, value := range kv {
+		newValue, err = sjson.Set(newValue, key, value)
+		if err != nil {
+			return fmt.Errorf("failed to set config field %s: %w", key, err)
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("failed to create config directory %q: %w", path, err)
@@ -150,6 +246,7 @@ func (s *ConfigStore) SetConfigField(scope Scope, key string, value any) error {
 	if err := os.WriteFile(path, []byte(newValue), 0o600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
+	s.invalidateConfigFileCache(scope)
 
 	// Auto-reload to keep in-memory state fresh after config edits.
 	// We use context.Background() since this is an internal operation that
@@ -185,6 +282,7 @@ func (s *ConfigStore) RemoveConfigField(scope Scope, key string) error {
 	if err := os.WriteFile(path, []byte(newValue), 0o600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
+	s.invalidateConfigFileCache(scope)
 
 	// Auto-reload to keep in-memory state fresh after config edits.
 	if err := s.autoReload(context.Background()); err != nil {
@@ -203,6 +301,69 @@ func (s *ConfigStore) UpdatePreferredModel(scope Scope, modelType SelectedModelT
 	}
 	if err := s.recordRecentModel(scope, modelType, model); err != nil {
 		return err
+	}
+	return nil
+}
+
+var ErrNoModelChoicesToSave = errors.New("no model choices to save")
+
+// pruneInvalidRecentModels drops entries from `recent_models.<type>` whose
+// (provider, model) is no longer resolvable in the current configuration.
+// Writes go to whichever writable scope (workspace or global) currently owns
+// the array; if neither scope has it on disk, no write is performed.
+func (s *ConfigStore) pruneInvalidRecentModels() error {
+	if s.config == nil {
+		return nil
+	}
+	for modelType, recents := range s.config.RecentModels {
+		valid := make([]SelectedModel, 0, len(recents))
+		for _, r := range recents {
+			if s.config.GetModel(r.Provider, r.Model) != nil {
+				valid = append(valid, r)
+			}
+		}
+		if len(valid) == len(recents) {
+			continue
+		}
+		// In-memory always reflects the pruned list.
+		s.config.RecentModels[modelType] = valid
+		// Determine which scope owns the on-disk recent list and write
+		// only to that scope. Skip persistence if neither scope has the
+		// field (e.g. the array originated from a project-level config).
+		key := fmt.Sprintf("recent_models.%s", modelType)
+		var scope Scope
+		switch {
+		case s.workspacePath != "" && s.HasConfigField(ScopeWorkspace, key):
+			scope = ScopeWorkspace
+		case s.HasConfigField(ScopeGlobal, key):
+			scope = ScopeGlobal
+		default:
+			continue
+		}
+		if err := s.SetConfigField(scope, key, valid); err != nil {
+			return fmt.Errorf("failed to prune recent_models.%s in %s scope: %w", modelType, scope, err)
+		}
+	}
+	return nil
+}
+
+// SaveModelChoicesAsDefault persists the current effective model choices to the
+// global data config. Writes are merged into the existing global file
+// per-key (e.g. `models.large`, `recent_models.small`) so that pre-existing
+// keys not present in the in-memory maps are preserved.
+func (s *ConfigStore) SaveModelChoicesAsDefault() error {
+	if len(s.config.Models) == 0 && len(s.config.RecentModels) == 0 {
+		return ErrNoModelChoicesToSave
+	}
+	fields := make(map[string]any, len(s.config.Models)+len(s.config.RecentModels))
+	for modelType, model := range s.config.Models {
+		fields[fmt.Sprintf("models.%s", modelType)] = model
+	}
+	for modelType, recents := range s.config.RecentModels {
+		fields[fmt.Sprintf("recent_models.%s", modelType)] = recents
+	}
+	if err := s.SetConfigFields(ScopeGlobal, fields); err != nil {
+		return fmt.Errorf("failed to save model choices as defaults: %w", err)
 	}
 	return nil
 }
@@ -247,10 +408,10 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 		}
 		setKeyOrToken = func() { providerConfig.APIKey = v }
 	case *oauth.Token:
-		if err := cmp.Or(
-			s.SetConfigField(scope, fmt.Sprintf("providers.%s.api_key", providerID), v.AccessToken),
-			s.SetConfigField(scope, fmt.Sprintf("providers.%s.oauth", providerID), v),
-		); err != nil {
+		if err := s.SetConfigFields(scope, map[string]any{
+			fmt.Sprintf("providers.%s.api_key", providerID): v.AccessToken,
+			fmt.Sprintf("providers.%s.oauth", providerID):   v,
+		}); err != nil {
 			return err
 		}
 		setKeyOrToken = func() {
@@ -352,10 +513,10 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 
 	s.config.Providers.Set(providerID, providerConfig)
 
-	if err := cmp.Or(
-		s.SetConfigField(scope, fmt.Sprintf("providers.%s.api_key", providerID), refreshedToken.AccessToken),
-		s.SetConfigField(scope, fmt.Sprintf("providers.%s.oauth", providerID), refreshedToken),
-	); err != nil {
+	if err := s.SetConfigFields(scope, map[string]any{
+		fmt.Sprintf("providers.%s.api_key", providerID): refreshedToken.AccessToken,
+		fmt.Sprintf("providers.%s.oauth", providerID):   refreshedToken,
+	}); err != nil {
 		return fmt.Errorf("failed to persist refreshed token: %w", err)
 	}
 
@@ -397,6 +558,26 @@ func (s *ConfigStore) loadTokenFromDisk(scope Scope, providerID string) (*oauth.
 	return &token, nil
 }
 
+func sameSelectedModel(a, b SelectedModel) bool {
+	return a.Provider == b.Provider && a.Model == b.Model
+}
+
+func normalizeRecentModels(models []SelectedModel) []SelectedModel {
+	var normalized []SelectedModel
+	for _, model := range models {
+		if model.Provider == "" || model.Model == "" || slices.ContainsFunc(normalized, func(existing SelectedModel) bool {
+			return sameSelectedModel(existing, model)
+		}) {
+			continue
+		}
+		normalized = append(normalized, SelectedModel{Provider: model.Provider, Model: model.Model})
+		if len(normalized) == maxRecentModelsPerType {
+			break
+		}
+	}
+	return normalized
+}
+
 // recordRecentModel records a model in the recent models list.
 func (s *ConfigStore) recordRecentModel(scope Scope, modelType SelectedModelType, model SelectedModel) error {
 	if model.Provider == "" || model.Model == "" {
@@ -407,36 +588,66 @@ func (s *ConfigStore) recordRecentModel(scope Scope, modelType SelectedModelType
 		s.config.RecentModels = make(map[SelectedModelType][]SelectedModel)
 	}
 
-	eq := func(a, b SelectedModel) bool {
-		return a.Provider == b.Provider && a.Model == b.Model
-	}
-
 	entry := SelectedModel{
 		Provider: model.Provider,
 		Model:    model.Model,
 	}
 
-	current := s.config.RecentModels[modelType]
-	withoutCurrent := slices.DeleteFunc(slices.Clone(current), func(existing SelectedModel) bool {
-		return eq(existing, entry)
-	})
-
-	updated := append([]SelectedModel{entry}, withoutCurrent...)
-	if len(updated) > maxRecentModelsPerType {
-		updated = updated[:maxRecentModelsPerType]
+	// For computing the persisted list, base the new array on the
+	// scope-specific on-disk recent_models array (not the merged in-memory
+	// list). Otherwise a workspace write would inherit recent entries that
+	// only exist in the global file, leaking global state into the
+	// workspace file.
+	stored, err := s.readRecentModelsFromScope(scope, modelType)
+	if err != nil {
+		return fmt.Errorf("failed to read recent models from %s scope: %w", scope, err)
 	}
+	updated := normalizeRecentModels(append([]SelectedModel{entry}, stored...))
 
-	if slices.EqualFunc(current, updated, eq) {
+	// In-memory recent list still reflects the merged view used for
+	// rendering: prepend the entry to the merged list.
+	current := s.config.RecentModels[modelType]
+	merged := normalizeRecentModels(append([]SelectedModel{entry}, current...))
+
+	if slices.EqualFunc(stored, updated, sameSelectedModel) &&
+		slices.EqualFunc(current, merged, sameSelectedModel) {
 		return nil
 	}
 
-	s.config.RecentModels[modelType] = updated
+	s.config.RecentModels[modelType] = merged
 
 	if err := s.SetConfigField(scope, fmt.Sprintf("recent_models.%s", modelType), updated); err != nil {
 		return fmt.Errorf("failed to persist recent models: %w", err)
 	}
 
 	return nil
+}
+
+// readRecentModelsFromScope reads recent_models.<modelType> from the on-disk
+// JSON for the given scope. Returns an empty slice when the scope's file or
+// key is absent. This is used to compute writes against the scope's own state
+// rather than the merged in-memory view.
+func (s *ConfigStore) readRecentModelsFromScope(scope Scope, modelType SelectedModelType) ([]SelectedModel, error) {
+	path, err := s.configPath(scope)
+	if err != nil {
+		return nil, err
+	}
+	data, err := s.readCachedConfigFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	raw := gjson.GetBytes(data, fmt.Sprintf("recent_models.%s", modelType))
+	if !raw.Exists() {
+		return nil, nil
+	}
+	var out []SelectedModel
+	if err := json.Unmarshal([]byte(raw.Raw), &out); err != nil {
+		return nil, fmt.Errorf("failed to parse recent_models.%s: %w", modelType, err)
+	}
+	return out, nil
 }
 
 // NewTestStore creates a ConfigStore for testing purposes.
@@ -469,10 +680,10 @@ func (s *ConfigStore) ImportCopilot() (*oauth.Token, bool) {
 		return token, false
 	}
 
-	if err := cmp.Or(
-		s.SetConfigField(ScopeGlobal, "providers.copilot.api_key", token.AccessToken),
-		s.SetConfigField(ScopeGlobal, "providers.copilot.oauth", token),
-	); err != nil {
+	if err := s.SetConfigFields(ScopeGlobal, map[string]any{
+		"providers.copilot.api_key": token.AccessToken,
+		"providers.copilot.oauth":   token,
+	}); err != nil {
 		slog.Error("Unable to save GitHub Copilot token to disk", "error", err)
 	}
 
@@ -642,14 +853,14 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 	}
 	cfg.setDefaults(s.workingDir, dataDir)
 
-	// Merge workspace config if present
+	// Merge workspace config if present, preserving per-type recent_models
+	// override semantics (workspace arrays replace global ones rather than
+	// concatenate).
 	workspacePath := filepath.Join(cfg.Options.DataDirectory, fmt.Sprintf("%s.json", appName))
 	if wsData, err := os.ReadFile(workspacePath); err == nil && len(wsData) > 0 {
-		merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
+		merged, mergeErr := loadWorkspaceOverride(cfg, wsData, s.workingDir, cfg.Options.DataDirectory)
 		if mergeErr == nil {
-			dataDir := cfg.Options.DataDirectory
 			*cfg = *merged
-			cfg.setDefaults(s.workingDir, dataDir)
 			loadedPaths = append(loadedPaths, workspacePath)
 		}
 	}
