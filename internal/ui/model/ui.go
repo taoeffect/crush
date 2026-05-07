@@ -347,7 +347,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 
 	status := NewStatus(com, ui)
 
-	ui.setEditorPrompt(false)
+	ui.setEditorPrompt(com.Workspace.PermissionSkipRequests())
 	ui.randomizePlaceholders()
 	ui.textarea.Placeholder = ui.readyPlaceholder
 	ui.status = status
@@ -3151,10 +3151,12 @@ func (m *UI) cacheSidebarLogo(width int) {
 	m.sidebarLogo = renderLogo(m.com.Styles, true, m.com.IsHyper(), width)
 }
 
-// applyTheme replaces the active styles with the given theme and
-// refreshes every component that caches style data.
+// applyTheme replaces the active styles with the given theme, drops the
+// shared markdown renderer cache, and refreshes every component that
+// caches style data.
 func (m *UI) applyTheme(s styles.Styles) {
 	*m.com.Styles = s
+	common.InvalidateMarkdownRendererCache()
 	m.refreshStyles()
 }
 
