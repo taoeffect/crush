@@ -256,6 +256,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.eventPromptSent(call.SessionID)
 
 	var currentAssistant *message.Message
+	var stepMessages []fantasy.Message
 	var shouldSummarize bool
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
 	var maxOutputTokens *int64
@@ -319,6 +320,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					prepared.Messages = append(prepared.Messages, statusMsg)
 				}
 			}
+
+			sessionLock.Lock()
+			stepMessages = cloneFantasyMessages(prepared.Messages)
+			sessionLock.Unlock()
 
 			var assistantMsg message.Message
 			assistantMsg, err = a.messages.Create(callContext, call.SessionID, message.CreateMessageParams{
@@ -445,7 +450,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			if getSessionErr != nil {
 				return getSessionErr
 			}
-			a.updateSessionUsage(largeModel, &updatedSession, stepResult.Usage, a.openrouterCost(stepResult.ProviderMetadata))
+			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
+			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)
 			if sessionErr != nil {
 				return sessionErr
@@ -746,12 +752,14 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
-	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost)
+	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, false)
 
 	// Just in case, get just the last usage info.
 	usage := resp.Response.Usage
 	currentSession.SummaryMessageID = summaryMessage.ID
-	currentSession.CompletionTokens = usage.OutputTokens
+	if completionTokens := summaryCompletionTokens(usage, summaryMessage); completionTokens != 0 {
+		currentSession.CompletionTokens = completionTokens
+	}
 	currentSession.PromptTokens = 0
 	_, err = a.sessions.Save(genCtx, currentSession)
 	if err != nil {
@@ -1125,28 +1133,49 @@ func (a *sessionAgent) openrouterCost(metadata fantasy.ProviderMetadata) *float6
 	return &opts.Usage.Cost
 }
 
-func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64) {
+func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimated bool) {
 	modelConfig := model.CatwalkCfg
 	cost := modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
 		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
 		modelConfig.CostPer1MIn/1e6*float64(usage.InputTokens) +
 		modelConfig.CostPer1MOut/1e6*float64(usage.OutputTokens)
 
-	a.eventTokensUsed(session.ID, model, usage, cost)
-
-	// Use override cost if available (e.g., from OpenRouter).
-	if overrideCost != nil {
-		cost = *overrideCost
+	if !estimated {
+		a.eventTokensUsed(session.ID, model, usage, cost)
 	}
 
-	// Skip cost accumulation
-	if model.FlatRate {
+	if estimated {
 		cost = 0
+	} else {
+		// Use override cost if available (e.g., from OpenRouter).
+		if overrideCost != nil {
+			cost = *overrideCost
+		}
+
+		// Skip cost accumulation
+		if model.FlatRate {
+			cost = 0
+		}
 	}
 
 	session.Cost += cost
-	session.CompletionTokens = usage.OutputTokens
-	session.PromptTokens = usage.InputTokens + usage.CacheReadTokens
+	updateSessionTokenCounters(session, usage)
+}
+
+func updateSessionTokenCounters(session *session.Session, usage fantasy.Usage) {
+	if usage.OutputTokens != 0 {
+		session.CompletionTokens = usage.OutputTokens
+	}
+	if promptTokens := usage.InputTokens + usage.CacheReadTokens; promptTokens != 0 {
+		session.PromptTokens = promptTokens
+	}
+}
+
+func summaryCompletionTokens(usage fantasy.Usage, summaryMessage message.Message) int64 {
+	if usage.OutputTokens != 0 {
+		return usage.OutputTokens
+	}
+	return approxTokenCount(summaryMessage.Content().Text) + approxTokenCount(summaryMessage.ReasoningContent().String())
 }
 
 // contextStatusMessage builds a compact context-usage system message so the
