@@ -53,7 +53,7 @@ const (
 	BashNoOutput               = "no output"
 )
 
-//go:embed bash.tpl
+//go:embed bash.md.tpl
 var bashDescriptionTmpl []byte
 
 var bashDescriptionTpl = template.Must(
@@ -65,7 +65,8 @@ type bashDescriptionData struct {
 	BannedCommands  string
 	MaxOutputLength int
 	Attribution     config.Attribution
-	ModelName       string
+	ModelID         string
+	RgAvailable     bool
 }
 
 var bannedCommands = []string{
@@ -141,14 +142,15 @@ var bannedCommands = []string{
 	"ufw",
 }
 
-func bashDescription(attribution *config.Attribution, modelName string) string {
+func bashDescription(attribution *config.Attribution, modelID string) string {
 	bannedCommandsStr := strings.Join(bannedCommands, ", ")
 	var out bytes.Buffer
 	if err := bashDescriptionTpl.Execute(&out, bashDescriptionData{
 		BannedCommands:  bannedCommandsStr,
 		MaxOutputLength: MaxOutputLength,
 		Attribution:     *attribution,
-		ModelName:       modelName,
+		ModelID:         modelID,
+		RgAvailable:     getRg() != "",
 	}); err != nil {
 		// this should never happen.
 		panic("failed to execute bash description template: " + err.Error())
@@ -188,10 +190,10 @@ func blockFuncs() []shell.BlockFunc {
 	}
 }
 
-func NewBashTool(permissions permission.Service, workingDir string, attribution *config.Attribution, modelName string) fantasy.AgentTool {
+func NewBashTool(permissions permission.Service, workingDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
-		string(bashDescription(attribution, modelName)),
+		string(bashDescription(attribution, modelID)),
 		func(ctx context.Context, params BashParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.Command == "" {
 				return fantasy.NewTextErrorResponse("missing command"), nil

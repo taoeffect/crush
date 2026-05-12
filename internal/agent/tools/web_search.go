@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	_ "embed"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,8 +13,13 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 )
 
-//go:embed web_search.md
-var webSearchToolDescription []byte
+//go:embed web_search.md.tpl
+var webSearchDescriptionTmpl []byte
+
+var webSearchDescriptionTpl = template.Must(
+	template.New("webSearchDescription").
+		Parse(string(webSearchDescriptionTmpl)),
+)
 
 type WebSearchOptions struct {
 	DefaultEngine config.SearchEngine
@@ -36,7 +42,7 @@ func NewWebSearchTool(client *http.Client, opts WebSearchOptions) fantasy.AgentT
 
 	return fantasy.NewParallelAgentTool(
 		WebSearchToolName,
-		FirstLineDescription(webSearchToolDescription),
+		renderToolDescription(webSearchDescriptionTpl),
 		func(ctx context.Context, params WebSearchParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.Query == "" {
 				return fantasy.NewTextErrorResponse("query is required"), nil

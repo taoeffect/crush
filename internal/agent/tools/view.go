@@ -6,8 +6,10 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,8 +24,25 @@ import (
 	"github.com/charmbracelet/crush/internal/skills"
 )
 
-//go:embed view.md
-var viewDescription []byte
+//go:embed view.md.tpl
+var viewDescriptionTmpl []byte
+
+var viewDescriptionTpl = template.Must(
+	template.New("viewDescription").
+		Parse(string(viewDescriptionTmpl)),
+)
+
+type viewDescriptionData struct {
+	DefaultReadLimit int
+	MaxViewSizeKB    int
+}
+
+func viewDescription() string {
+	return renderTemplate(viewDescriptionTpl, viewDescriptionData{
+		DefaultReadLimit: DefaultReadLimit,
+		MaxViewSizeKB:    MaxViewSize / 1024,
+	})
+}
 
 type ViewParams struct {
 	FilePath string `json:"file_path" description:"The path to the file to read"`
@@ -78,7 +97,7 @@ func NewViewTool(
 ) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		ViewToolName,
-		FirstLineDescription(viewDescription),
+		viewDescription(),
 		func(ctx context.Context, params ViewParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.FilePath == "" {
 				return fantasy.NewTextErrorResponse("file_path is required"), nil
@@ -195,6 +214,14 @@ func NewViewTool(
 				if readErr != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error reading image file: %w", readErr)
 				}
+
+				// Some tools save files with a mismatched extension
+				// (e.g. pinchtab writes JPEG bytes to a .png file).
+				// Providers like Anthropic strictly validate the
+				// media type against the base64 magic bytes and 400
+				// on mismatch, so prefer the sniffed type whenever
+				// it identifies a supported image format.
+				mimeType = sniffImageMimeType(imageData, mimeType)
 
 				return fantasy.NewImageResponse(imageData, mimeType), nil
 			}
@@ -336,6 +363,26 @@ func getImageMimeType(filePath string) (bool, string) {
 	default:
 		return false, ""
 	}
+}
+
+// sniffImageMimeType returns the content-sniffed MIME type when it identifies
+// a supported image format. Otherwise it returns the provided fallback, which
+// is usually the extension-derived type. Providers that validate the image
+// media type against the base64 magic bytes (e.g. Anthropic) reject mismatched
+// requests with a 400, so trusting the filename alone is unsafe.
+func sniffImageMimeType(data []byte, fallback string) string {
+	sniffed := http.DetectContentType(data)
+	// http.DetectContentType may return the MIME with a ";" parameter
+	// (e.g. "image/svg+xml; charset=utf-8") although current image sniffers
+	// return bare types; strip defensively.
+	if i := strings.IndexByte(sniffed, ';'); i >= 0 {
+		sniffed = strings.TrimSpace(sniffed[:i])
+	}
+	switch sniffed {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return sniffed
+	}
+	return fallback
 }
 
 type LineScanner struct {

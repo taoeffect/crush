@@ -858,7 +858,7 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 	// concatenate).
 	workspacePath := filepath.Join(cfg.Options.DataDirectory, fmt.Sprintf("%s.json", appName))
 	if wsData, err := os.ReadFile(workspacePath); err == nil && len(wsData) > 0 {
-		merged, mergeErr := loadWorkspaceOverride(cfg, wsData, s.workingDir, cfg.Options.DataDirectory)
+		merged, mergeErr := loadWorkspaceOverride(cfg, wsData, s.workingDir, cfg.Options.DataDirectory, workspacePath)
 		if mergeErr == nil {
 			*cfg = *merged
 			loadedPaths = append(loadedPaths, workspacePath)
