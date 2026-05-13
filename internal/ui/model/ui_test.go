@@ -1,13 +1,18 @@
 package model
 
 import (
+	"strings"
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
+	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/workspace"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/charmtone"
 	"github.com/stretchr/testify/require"
 )
 
@@ -74,6 +79,47 @@ func TestCurrentModelSupportsImages(t *testing.T) {
 	})
 }
 
+func TestRenderHeaderDetailsStylesEstimatedUsageWithTang(t *testing.T) {
+	t.Parallel()
+
+	providers := csync.NewMap[string, config.ProviderConfig]()
+	providers.Set("test-provider", config.ProviderConfig{
+		ID: "test-provider",
+		Models: []catwalk.Model{
+			{ID: "test-model", ContextWindow: 1000},
+		},
+	})
+	cfg := &config.Config{
+		Models: map[config.SelectedModelType]config.SelectedModel{
+			config.SelectedModelTypeLarge: {
+				Provider: "test-provider",
+				Model:    "test-model",
+			},
+		},
+		Providers: providers,
+		Agents: map[string]config.Agent{
+			config.AgentCoder: {Model: config.SelectedModelTypeLarge},
+		},
+	}
+	sty := styles.CharmtonePantera()
+	com := &common.Common{
+		Workspace: &testWorkspace{cfg: cfg, workingDir: "/tmp/crush"},
+		Styles:    &sty,
+	}
+	sess := &session.Session{
+		ID:               "session-id",
+		PromptTokens:     120,
+		CompletionTokens: 0,
+		EstimatedUsage:   true,
+	}
+
+	rendered := renderHeaderDetails(com, sess, 0, false, 120, nil)
+	actual := ansi.Strip(rendered)
+
+	require.Contains(t, actual, "~12%")
+	require.True(t, strings.Contains(rendered, sty.Header.Percentage.Foreground(charmtone.Tang).Render("~12%")))
+}
+
 func newTestUIWithConfig(t *testing.T, cfg *config.Config) *UI {
 	t.Helper()
 
@@ -89,6 +135,7 @@ type testWorkspace struct {
 	workspace.Workspace
 	cfg          *config.Config
 	configFields map[string]any
+	workingDir   string
 }
 
 func (w *testWorkspace) Config() *config.Config {
@@ -101,4 +148,12 @@ func (w *testWorkspace) SetConfigField(_ config.Scope, key string, value any) er
 	}
 	w.configFields[key] = value
 	return nil
+}
+
+func (w *testWorkspace) LSPGetStates() map[string]workspace.LSPClientInfo {
+	return nil
+}
+
+func (w *testWorkspace) WorkingDir() string {
+	return w.workingDir
 }
