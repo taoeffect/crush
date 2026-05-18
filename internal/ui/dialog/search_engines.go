@@ -38,6 +38,7 @@ type SearchEngines struct {
 }
 
 type SearchEngineItem struct {
+	*list.Versioned
 	engine    config.SearchEngine
 	title     string
 	info      string
@@ -46,6 +47,10 @@ type SearchEngineItem struct {
 	m         fuzzy.Match
 	cache     map[int]string
 	focused   bool
+}
+
+func (s *SearchEngineItem) Finished() bool {
+	return true
 }
 
 var (
@@ -237,6 +242,7 @@ func (s *SearchEngines) setSearchEngineItems() {
 	selectedIndex := 0
 	for i, engine := range engines {
 		item := &SearchEngineItem{
+			Versioned: list.NewVersioned(),
 			engine:    engine.engine,
 			title:     engine.title,
 			info:      engine.info,
@@ -267,15 +273,25 @@ func (s *SearchEngineItem) canEdit() bool {
 }
 
 func (s *SearchEngineItem) SetFocused(focused bool) {
-	if s.focused != focused {
-		s.cache = nil
+	if s.focused == focused {
+		return
 	}
+	s.cache = nil
 	s.focused = focused
+	if s.Versioned != nil {
+		s.Bump()
+	}
 }
 
 func (s *SearchEngineItem) SetMatch(m fuzzy.Match) {
+	if sameFuzzyMatch(s.m, m) {
+		return
+	}
 	s.cache = nil
 	s.m = m
+	if s.Versioned != nil {
+		s.Bump()
+	}
 }
 
 func (s *SearchEngineItem) Render(width int) string {

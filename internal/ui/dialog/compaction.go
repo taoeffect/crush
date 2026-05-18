@@ -38,6 +38,7 @@ type Compaction struct {
 
 // CompactionItem represents a compaction method list item.
 type CompactionItem struct {
+	*list.Versioned
 	method    string
 	title     string
 	isCurrent bool
@@ -45,6 +46,10 @@ type CompactionItem struct {
 	m         fuzzy.Match
 	cache     map[int]string
 	focused   bool
+}
+
+func (ci *CompactionItem) Finished() bool {
+	return true
 }
 
 var (
@@ -234,6 +239,7 @@ func (c *Compaction) setCompactionItems() {
 	selectedIndex := 0
 	for i, opt := range compactionOptions {
 		item := &CompactionItem{
+			Versioned: list.NewVersioned(),
 			method:    string(opt.method),
 			title:     opt.title,
 			isCurrent: opt.method == current,
@@ -262,16 +268,26 @@ func (ci *CompactionItem) ID() string {
 
 // SetFocused sets the focus state of the compaction item.
 func (ci *CompactionItem) SetFocused(focused bool) {
-	if ci.focused != focused {
-		ci.cache = nil
+	if ci.focused == focused {
+		return
 	}
+	ci.cache = nil
 	ci.focused = focused
+	if ci.Versioned != nil {
+		ci.Bump()
+	}
 }
 
 // SetMatch sets the fuzzy match for the compaction item.
 func (ci *CompactionItem) SetMatch(m fuzzy.Match) {
+	if sameFuzzyMatch(ci.m, m) {
+		return
+	}
 	ci.cache = nil
 	ci.m = m
+	if ci.Versioned != nil {
+		ci.Bump()
+	}
 }
 
 // Render returns the string representation of the compaction item.
