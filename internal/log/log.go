@@ -16,11 +16,16 @@ import (
 )
 
 var (
+	setupMu     sync.Mutex
 	initOnce    sync.Once
 	initialized atomic.Bool
+	closer      io.Closer
 )
 
 func Setup(logFile string, debug bool, ws ...io.Writer) {
+	setupMu.Lock()
+	defer setupMu.Unlock()
+
 	initOnce.Do(func() {
 		logRotator := &lumberjack.Logger{
 			Filename:   logFile,
@@ -55,8 +60,24 @@ func Setup(logFile string, debug bool, ws ...io.Writer) {
 		}
 
 		slog.SetDefault(slog.New(slog.NewMultiHandler(handlers...)))
+		closer = logRotator
 		initialized.Store(true)
 	})
+}
+
+func Close() error {
+	setupMu.Lock()
+	defer setupMu.Unlock()
+
+	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	initialized.Store(false)
+	initOnce = sync.Once{}
+	if closer == nil {
+		return nil
+	}
+	err := closer.Close()
+	closer = nil
+	return err
 }
 
 func Initialized() bool {
