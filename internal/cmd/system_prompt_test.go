@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/config"
+	crushlog "github.com/charmbracelet/crush/internal/log"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +51,10 @@ func TestSetupLocalWorkspace_SystemPromptOverride(t *testing.T) {
 
 	ws, cleanup, err := setupLocalWorkspace(cmd)
 	require.NoError(t, err)
-	defer cleanup()
+	defer func() {
+		cleanup()
+		require.NoError(t, crushlog.Close())
+	}()
 
 	storeProvider, ok := ws.(interface{ Store() *config.ConfigStore })
 	require.True(t, ok)
