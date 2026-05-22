@@ -120,4 +120,4 @@ jobs:
         run: npm pack --dry-run
       - name: Publish npm package
         working-directory: .release/npm-package
-        run: npm publish --access public --tag taoeffect
+        run: npm publish --access public --tag latest

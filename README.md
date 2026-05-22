@@ -26,13 +26,12 @@
 Install the Tao Effect fork from npm:
 
 ```bash
-npm install -g @taoeffects/crush@taoeffect
+npm install -g @taoeffects/crush
 ```
 
-The `@taoeffects/crush` package is published under the `taoeffect` npm dist-tag
-because fork releases use prerelease versions such as `0.70.0-taoeffect.1`:
-`0.70.0` identifies the upstream Crush release, and `taoeffect.1` identifies the
-fork release iteration.
+Fork releases use versions such as `0.70.0-taoeffect.1`: `0.70.0` identifies
+the upstream Crush release, and `taoeffect.1` identifies this fork's release
+iteration.
 
 Or just install it with Go from a clone:
 
