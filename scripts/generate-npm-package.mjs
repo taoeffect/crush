@@ -33,9 +33,15 @@ function getOption(args, name, envName, fallback) {
   return args.get(name) ?? process.env[envName] ?? fallback;
 }
 
+async function readTemplateVersion() {
+  const packageJSONPath = join(repoRoot, "npm", "package.json");
+  const packageJSON = JSON.parse(await readFile(packageJSONPath, "utf8"));
+  return packageJSON.version;
+}
+
 function normalizeVersion(version) {
   if (!version) {
-    throw new Error("Missing version. Pass --version or set VERSION.");
+    throw new Error("Missing version. Pass --version, set VERSION, or set npm/package.json version.");
   }
   const normalized = version.replace(/^v/, "");
   if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(normalized)) {
@@ -111,7 +117,7 @@ function assertSafeOutputDir(outputDir) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const version = normalizeVersion(getOption(args, "version", "VERSION"));
+  const version = normalizeVersion(getOption(args, "version", "VERSION", await readTemplateVersion()));
   const tag = normalizeTag(getOption(args, "tag", "TAG"), version);
   const repo = getOption(args, "repo", "GITHUB_REPOSITORY", "taoeffect/crush");
   const distDir = resolve(getOption(args, "dist", "DIST_DIR", join(repoRoot, "dist")));
