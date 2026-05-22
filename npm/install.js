@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import { ProxyAgent } from "proxy-agent";
-import tar from "tar";
+import * as tar from "tar";
 
 import {
   assertSafeArchivePath,
