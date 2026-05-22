@@ -1,0 +1,32 @@
+{
+  "name": "@taoeffects/crush",
+  "type": "module",
+  "version": "0.0.0",
+  "description": "A terminal-based AI coding assistant forked from Charm Crush.",
+  "scripts": {
+    "postinstall": "node install.js",
+    "run": "node run-crush.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taoeffect/crush.git"
+  },
+  "license": "FSL-1.1-MIT",
+  "bugs": {
+    "url": "https://github.com/taoeffect/crush/issues"
+  },
+  "bin": {
+    "crush": "run-crush.js"
+  },
+  "dependencies": {
+    "proxy-agent": "8.0.1",
+    "tar": "7.5.13"
+  },
+  "files": [
+    "install.js",
+    "run-crush.js",
+    "lib.js",
+    "README.md",
+    "LICENSE.md"
+  ]
+}
