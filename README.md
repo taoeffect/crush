@@ -21,6 +21,8 @@
 - **Works Everywhere:** first-class support in every terminal on macOS, Linux, Windows (PowerShell and WSL), Android, FreeBSD, OpenBSD, and NetBSD
 - **Industrial Grade:** built on the Charm ecosystem, powering 25k+ applications, from leading open source projects to business-critical infrastructure
 
+Plus [everything here](https://github.com/charmbracelet/crush/pulls?q=is%3Apr+author%3Ataoeffect+) that's not found in upstream.
+
 ## Installation
 
 Install the Tao Effect fork from npm:
