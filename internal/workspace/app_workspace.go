@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -60,6 +61,10 @@ func (w *AppWorkspace) DeleteSession(ctx context.Context, sessionID string) erro
 	return w.app.Sessions.Delete(ctx, sessionID)
 }
 
+func (w *AppWorkspace) ListSessionModels(ctx context.Context, sessionID string) ([]session.SessionModel, error) {
+	return w.app.Sessions.ListModels(ctx, sessionID)
+}
+
 func (w *AppWorkspace) CreateAgentToolSessionID(messageID, toolCallID string) string {
 	return w.app.Sessions.CreateAgentToolSessionID(messageID, toolCallID)
 }
@@ -75,7 +80,7 @@ func (w *AppWorkspace) ListMessages(ctx context.Context, sessionID string) ([]me
 	// in-memory state. message.Service buffers streaming deltas and a
 	// cold List would otherwise miss them at session-switch time.
 	if err := w.app.Messages.FlushAll(ctx); err != nil {
-		return nil, err
+		slog.Warn("Failed to flush pending message updates before listing messages", "sessionID", sessionID, "error", err)
 	}
 	return w.app.Messages.List(ctx, sessionID)
 }

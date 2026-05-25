@@ -333,6 +333,7 @@ func TestReloadFromDisk_WorkspaceRecentModelsOverrideGlobalRecentModels(t *testi
 
 	dir := t.TempDir()
 	globalDataDir := filepath.Join(dir, "global-data")
+	t.Setenv("CRUSH_GLOBAL_CONFIG", filepath.Join(dir, "no-such-global-config"))
 	t.Setenv("CRUSH_GLOBAL_DATA", globalDataDir)
 
 	globalPath := filepath.Join(globalDataDir, "crush.json")
@@ -527,6 +528,7 @@ func TestConfigStaleness_RefreshClearsDirtyState(t *testing.T) {
 // so the new config values are used rather than stale pre-reload values.
 func TestReloadFromDisk_UsesNewConfigValues(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("CRUSH_GLOBAL_CONFIG", filepath.Join(dir, "no-such-global-config"))
 	configPath := filepath.Join(dir, "crush.json")
 
 	// Isolate from the host's global config so only test-provided
@@ -766,9 +768,6 @@ func TestConfigStore_UpdatePreferredModel_WorkspaceScopeKeepsGlobalUnchanged(t *
 	workspacePath := filepath.Join(dir, "workspace", ".crush", "crush.json")
 	require.NoError(t, os.MkdirAll(filepath.Dir(globalPath), 0o755))
 	require.NoError(t, os.WriteFile(globalPath, []byte(`{"models":{"large":{"provider":"openai","model":"global-large"}}}`), 0o600))
-	beforeGlobal, err := os.ReadFile(globalPath)
-	require.NoError(t, err)
-
 	cfg := &Config{}
 	cfg.setDefaults(dir, "")
 	store := &ConfigStore{
@@ -780,9 +779,16 @@ func TestConfigStore_UpdatePreferredModel_WorkspaceScopeKeepsGlobalUnchanged(t *
 	selected := SelectedModel{Provider: "anthropic", Model: "claude-3"}
 	require.NoError(t, store.UpdatePreferredModel(ScopeWorkspace, SelectedModelTypeLarge, selected))
 
-	afterGlobal, err := os.ReadFile(globalPath)
-	require.NoError(t, err)
-	require.Equal(t, string(beforeGlobal), string(afterGlobal))
+	// Models remain untouched in global (workspace models don't leak).
+	// Recent models are written to global so they're visible across
+	// projects, but global models are unchanged.
+	global := readConfigJSON(t, globalPath)
+	globalModels, ok := global["models"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "global-large", globalModels["large"].(map[string]any)["model"])
+	globalRecents, ok := global["recent_models"].(map[string]any)
+	require.True(t, ok)
+	require.Len(t, globalRecents[string(SelectedModelTypeLarge)].([]any), 1)
 
 	workspace := readConfigJSON(t, workspacePath)
 	models, ok := workspace["models"].(map[string]any)
