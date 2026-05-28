@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/google/uuid"
 )
 
 type controllerV1 struct {
@@ -134,6 +136,56 @@ func (c *controllerV1) handlePostWorkspaces(w http.ResponseWriter, r *http.Reque
 	jsonEncode(w, result)
 }
 
+// requireClientID reads the client_id query parameter and validates it
+// as a UUID. On failure it writes a 400 and returns false.
+func (c *controllerV1) requireClientID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	cid := r.URL.Query().Get("client_id")
+	if cid == "" {
+		c.server.logError(r, "Missing client_id query parameter")
+		jsonError(w, http.StatusBadRequest, "client_id is required")
+		return "", false
+	}
+	if _, err := uuid.Parse(cid); err != nil {
+		c.server.logError(r, "Invalid client_id", "error", err)
+		jsonError(w, http.StatusBadRequest, "client_id is not a valid UUID")
+		return "", false
+	}
+	return cid, true
+}
+
+// handlePostWorkspaceCurrentSession records the calling client's
+// current session selection for the workspace. An empty session_id
+// clears the entry (e.g. the client is on the landing screen).
+//
+//	@Summary		Set current session for a client
+//	@Tags			workspaces
+//	@Accept			json
+//	@Produce		json
+//	@Param			id			path	string					true	"Workspace ID"
+//	@Param			client_id	query	string					true	"Client ID (UUID)"
+//	@Param			request		body	proto.CurrentSession	true	"Current session selection"
+//	@Success		200
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Router			/workspaces/{id}/current-session [post]
+func (c *controllerV1) handlePostWorkspaceCurrentSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	clientID, ok := c.requireClientID(w, r)
+	if !ok {
+		return
+	}
+	var req proto.CurrentSession
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+	if err := c.backend.SetCurrentSession(id, clientID, req.SessionID); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+}
+
 // handleDeleteWorkspaces deletes a workspace.
 //
 //	@Summary		Delete workspace
@@ -144,7 +196,14 @@ func (c *controllerV1) handlePostWorkspaces(w http.ResponseWriter, r *http.Reque
 //	@Router			/workspaces/{id} [delete]
 func (c *controllerV1) handleDeleteWorkspaces(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	c.backend.DeleteWorkspace(id)
+	clientID, ok := c.requireClientID(w, r)
+	if !ok {
+		return
+	}
+	if err := c.backend.DeleteWorkspace(id, clientID); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
 }
 
 // handleGetWorkspaceConfig returns workspace configuration.
@@ -200,6 +259,15 @@ func (c *controllerV1) handleGetWorkspaceProviders(w http.ResponseWriter, r *htt
 func (c *controllerV1) handleGetWorkspaceEvents(w http.ResponseWriter, r *http.Request) {
 	flusher := http.NewResponseController(w)
 	id := r.PathValue("id")
+	clientID, ok := c.requireClientID(w, r)
+	if !ok {
+		return
+	}
+	if err := c.backend.AttachClient(id, clientID); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	defer c.backend.DetachClient(id, clientID)
 	events, err := c.backend.SubscribeEvents(r.Context(), id)
 	if err != nil {
 		c.handleError(w, r, err)
@@ -209,6 +277,12 @@ func (c *controllerV1) handleGetWorkspaceEvents(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Flush headers immediately so clients see the 200 response
+	// before any events arrive. Without this, a quiet workspace
+	// keeps the client's SubscribeEvents call blocked on the
+	// initial RoundTrip.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	for {
 		select {
@@ -304,9 +378,12 @@ func (c *controllerV1) handleGetWorkspaceSessions(w http.ResponseWriter, r *http
 		c.handleError(w, r, err)
 		return
 	}
+	ws, _ := c.backend.GetWorkspace(id)
 	result := make([]proto.Session, len(sessions))
 	for i, s := range sessions {
 		result[i] = sessionToProto(s)
+		result[i].IsBusy = isSessionBusy(ws, s.ID)
+		result[i].AttachedClients = attachedClients(ws, s.ID)
 	}
 	jsonEncode(w, result)
 }
@@ -339,7 +416,11 @@ func (c *controllerV1) handlePostWorkspaceSessions(w http.ResponseWriter, r *htt
 		c.handleError(w, r, err)
 		return
 	}
-	jsonEncode(w, sessionToProto(sess))
+	ws, _ := c.backend.GetWorkspace(id)
+	out := sessionToProto(sess)
+	out.IsBusy = isSessionBusy(ws, sess.ID)
+	out.AttachedClients = attachedClients(ws, sess.ID)
+	jsonEncode(w, out)
 }
 
 // handleGetWorkspaceSession returns a single session.
@@ -361,7 +442,11 @@ func (c *controllerV1) handleGetWorkspaceSession(w http.ResponseWriter, r *http.
 		c.handleError(w, r, err)
 		return
 	}
-	jsonEncode(w, sessionToProto(sess))
+	ws, _ := c.backend.GetWorkspace(id)
+	out := sessionToProto(sess)
+	out.IsBusy = isSessionBusy(ws, sess.ID)
+	out.AttachedClients = attachedClients(ws, sess.ID)
+	jsonEncode(w, out)
 }
 
 // handleGetWorkspaceSessionHistory returns the history for a session.
@@ -437,7 +522,11 @@ func (c *controllerV1) handlePutWorkspaceSession(w http.ResponseWriter, r *http.
 		c.handleError(w, r, err)
 		return
 	}
-	jsonEncode(w, sessionToProto(saved))
+	ws, _ := c.backend.GetWorkspace(id)
+	out := sessionToProto(saved)
+	out.IsBusy = isSessionBusy(ws, saved.ID)
+	out.AttachedClients = attachedClients(ws, saved.ID)
+	jsonEncode(w, out)
 }
 
 // handleDeleteWorkspaceSession deletes a session.
@@ -667,7 +756,14 @@ func (c *controllerV1) handlePostWorkspaceAgent(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if err := c.backend.SendMessage(r.Context(), id, msg); err != nil {
+	// Detach the run's lifetime from the prompting client's HTTP
+	// request. Without this, A dropping its TCP connection (network
+	// blip, TUI restart) or B canceling the session via the explicit
+	// cancel endpoint would also cancel A's request context and tear
+	// down a turn that other subscribed clients are still watching.
+	// Only the explicit cancel endpoint should be able to end a run.
+	ctx := context.WithoutCancel(r.Context())
+	if err := c.backend.SendMessage(ctx, id, msg); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -865,7 +961,7 @@ func (c *controllerV1) handleGetWorkspaceAgentDefaultSmallModel(w http.ResponseW
 //	@Accept			json
 //	@Param			id		path	string				true	"Workspace ID"
 //	@Param			request	body	proto.PermissionGrant	true	"Permission grant"
-//	@Success		200
+//	@Success		200	{object}	proto.PermissionGrantResponse
 //	@Failure		400	{object}	proto.Error
 //	@Failure		404	{object}	proto.Error
 //	@Failure		500	{object}	proto.Error
@@ -880,11 +976,12 @@ func (c *controllerV1) handlePostWorkspacePermissionsGrant(w http.ResponseWriter
 		return
 	}
 
-	if err := c.backend.GrantPermission(id, req); err != nil {
+	resolved, err := c.backend.GrantPermission(id, req)
+	if err != nil {
 		c.handleError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	jsonEncode(w, proto.PermissionGrantResponse{Resolved: resolved})
 }
 
 // handlePostWorkspacePermissionsSkip sets whether to skip permission prompts.
@@ -938,6 +1035,14 @@ func (c *controllerV1) handleGetWorkspacePermissionsSkip(w http.ResponseWriter, 
 // handleError maps backend errors to HTTP status codes and writes the
 // JSON error response.
 func (c *controllerV1) handleError(w http.ResponseWriter, r *http.Request, err error) {
+	// A canceled agent run is not an error from the prompting
+	// client's perspective. The cancellation reaches every SSE
+	// subscriber via the FinishReasonCanceled marker on the assistant
+	// message; the still-open POST should not surface a 500.
+	if errors.Is(err, context.Canceled) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	status := http.StatusInternalServerError
 	code := ""
 	switch {
@@ -956,6 +1061,10 @@ func (c *controllerV1) handleError(w http.ResponseWriter, r *http.Request, err e
 	case errors.Is(err, config.ErrNoModelChoicesToSave):
 		status = http.StatusBadRequest
 		code = proto.ErrCodeNoModelChoicesToSave
+	case errors.Is(err, backend.ErrInvalidClientID):
+		status = http.StatusBadRequest
+	case errors.Is(err, backend.ErrClientNotAttached):
+		status = http.StatusNotFound
 	}
 	c.server.logError(r, err.Error())
 	jsonErrorWithCode(w, status, err.Error(), code)
