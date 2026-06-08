@@ -1,7 +1,7 @@
 {
   "name": "@taoeffects/crush",
   "type": "module",
-  "version": "0.75.0-taoeffect.1",
+  "version": "0.76.0-taoeffect.1",
   "description": "A terminal-based AI coding assistant forked from Charm Crush.",
   "scripts": {
     "postinstall": "node install.js",
