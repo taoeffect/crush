@@ -28,6 +28,9 @@ Plus [everything here](https://github.com/charmbracelet/crush/pulls?q=is%3Apr+au
 Install the Tao Effect fork from npm:
 
 ```bash
+# this is needed so that the binary can be downloaded and installed
+npm config set allow-scripts=@taoeffects/crush --location=user
+# install
 npm install -g @taoeffects/crush
 ```
 
