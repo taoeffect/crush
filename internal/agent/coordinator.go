@@ -1301,12 +1301,64 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
 	}
 
-	// Update parent session cost
+	// Update parent session cost on a best-effort basis. A failure here must
+	// not discard the sub-agent output that was already produced.
 	if err := c.updateParentSessionCost(ctx, session.ID, params.SessionID); err != nil {
-		return fantasy.ToolResponse{}, err
+		slog.Warn("Failed to update parent session cost",
+			"child_session", session.ID,
+			"parent_session", params.SessionID,
+			"error", err,
+		)
 	}
 
-	return fantasy.NewTextResponse(result.Response.Content.Text()), nil
+	return fantasy.NewTextResponse(c.subAgentOutput(ctx, session.ID, result)), nil
+}
+
+func (c *coordinator) subAgentOutput(ctx context.Context, sessionID string, result *fantasy.AgentResult) string {
+	if result != nil {
+		if texts := responseContentText(result.Response.Content); len(texts) > 0 {
+			return strings.Join(texts, "\n\n")
+		}
+
+		var texts []string
+		for _, step := range result.Steps {
+			texts = append(texts, responseContentText(step.Content)...)
+		}
+		if len(texts) > 0 {
+			return strings.Join(texts, "\n\n")
+		}
+	}
+
+	if c.messages != nil {
+		messages, err := c.messages.List(ctx, sessionID)
+		if err != nil {
+			slog.Warn("Failed to list sub-agent messages", "session", sessionID, "error", err)
+		} else {
+			for i := len(messages) - 1; i >= 0; i-- {
+				msg := messages[i]
+				if msg.Role != message.Assistant {
+					continue
+				}
+				if text := msg.Content().String(); strings.TrimSpace(text) != "" {
+					return text
+				}
+			}
+		}
+	}
+
+	return "Sub-agent completed but produced no text output."
+}
+
+func responseContentText(content fantasy.ResponseContent) []string {
+	texts := make([]string, 0)
+	for _, part := range content {
+		textContent, ok := fantasy.AsContentType[fantasy.TextContent](part)
+		if !ok || strings.TrimSpace(textContent.Text) == "" {
+			continue
+		}
+		texts = append(texts, textContent.Text)
+	}
+	return texts
 }
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.

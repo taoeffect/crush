@@ -10,6 +10,7 @@ import (
 	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/bedrock"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,6 +62,7 @@ func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCf
 	return &coordinator{
 		cfg:      cfg,
 		sessions: env.sessions,
+		messages: env.messages,
 	}
 }
 
@@ -81,13 +83,35 @@ func newMockAgent(providerID string, maxTokens int64, runFunc func(context.Conte
 
 // agentResultWithText creates a minimal AgentResult with the given text response.
 func agentResultWithText(text string) *fantasy.AgentResult {
+	return agentResultWithTextBlocks(text)
+}
+
+func agentResultWithTextBlocks(texts ...string) *fantasy.AgentResult {
+	content := make(fantasy.ResponseContent, 0, len(texts))
+	for _, text := range texts {
+		content = append(content, fantasy.TextContent{Text: text})
+	}
 	return &fantasy.AgentResult{
 		Response: fantasy.Response{
-			Content: fantasy.ResponseContent{
-				fantasy.TextContent{Text: text},
-			},
+			Content: content,
 		},
 	}
+}
+
+func agentResultWithStepTexts(texts ...string) *fantasy.AgentResult {
+	result := &fantasy.AgentResult{
+		Steps: make([]fantasy.StepResult, 0, len(texts)),
+	}
+	for _, text := range texts {
+		result.Steps = append(result.Steps, fantasy.StepResult{
+			Response: fantasy.Response{
+				Content: fantasy.ResponseContent{
+					fantasy.TextContent{Text: text},
+				},
+			},
+		})
+	}
+	return result
 }
 
 func TestRunSubAgent(t *testing.T) {
@@ -118,6 +142,142 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "done", resp.Content)
 		assert.False(t, resp.IsError)
+	})
+
+	t.Run("cost update failure preserves output", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return agentResultWithText("output before cost failure"), nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      "missing-parent-session",
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "output before cost failure", resp.Content)
+	})
+
+	t.Run("persisted assistant message fallback", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Assistant,
+				Parts: []message.ContentPart{
+					message.TextContent{Text: "persisted assistant output"},
+				},
+			})
+			require.NoError(t, err)
+			return &fantasy.AgentResult{}, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "persisted assistant output", resp.Content)
+	})
+
+	t.Run("aggregates earlier step output", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return agentResultWithStepTexts("first step", "second step"), nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "first step\n\nsecond step", resp.Content)
+	})
+
+	t.Run("final response text wins over fallback sources", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Assistant,
+				Parts: []message.ContentPart{
+					message.TextContent{Text: "persisted fallback"},
+				},
+			})
+			require.NoError(t, err)
+
+			result := agentResultWithText("final response")
+			result.Steps = agentResultWithStepTexts("earlier step").Steps
+			return result, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "final response", resp.Content)
+	})
+
+	t.Run("aggregates multi-block final response", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			result := agentResultWithTextBlocks("first final block", "second final block")
+			result.Steps = agentResultWithStepTexts("earlier step").Steps
+			return result, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "first final block\n\nsecond final block", resp.Content)
 	})
 
 	t.Run("ModelCfg.MaxTokens overrides default", func(t *testing.T) {
