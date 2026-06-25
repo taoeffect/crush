@@ -17,7 +17,7 @@ func TestSetCompactionMethod(t *testing.T) {
 	err := store.SetCompactionMethod(ScopeGlobal, CompactionLLM)
 	require.NoError(t, err)
 
-	require.Equal(t, CompactionLLM, cfg.Options.CompactionMethod)
+	require.Equal(t, CompactionLLM, store.Config().Options.CompactionMethod)
 
 	out := readConfigJSON(t, store.globalDataPath)
 	opts, ok := out["options"].(map[string]any)
@@ -54,6 +54,6 @@ func TestSetCompactionMethod_NilOptions(t *testing.T) {
 	err := store.SetCompactionMethod(ScopeGlobal, CompactionAuto)
 	require.NoError(t, err)
 
-	require.NotNil(t, cfg.Options)
-	require.Equal(t, CompactionAuto, cfg.Options.CompactionMethod)
+	require.NotNil(t, store.Config().Options)
+	require.Equal(t, CompactionAuto, store.Config().Options.CompactionMethod)
 }

@@ -708,7 +708,7 @@ func TestAutoReloadDisabledDuringReload(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(initialConfig), 0o600))
 
 	// Load will trigger configureProviders which removes anthropic OAuth config.
-	// This should NOT cause infinite recursion — reloadMu prevents re-entrant reloads.
+	// This should NOT cause infinite recursion — writeMu prevents re-entrant reloads.
 	store, err := Load(dir, dir, false)
 	require.NoError(t, err)
 
@@ -775,16 +775,14 @@ func TestConfigStore_UpdatePreferredModel_WorkspaceScopeKeepsGlobalUnchanged(t *
 	selected := SelectedModel{Provider: "anthropic", Model: "claude-3"}
 	require.NoError(t, store.UpdatePreferredModel(ScopeWorkspace, SelectedModelTypeLarge, selected))
 
-	// Models remain untouched in global (workspace models don't leak).
-	// Recent models are written to global so they're visible across
-	// projects, but global models are unchanged.
+	// Models and recent models remain untouched in global; workspace model
+	// choices and recents stay isolated to the workspace file.
 	global := readConfigJSON(t, globalPath)
 	globalModels, ok := global["models"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "global-large", globalModels["large"].(map[string]any)["model"])
-	globalRecents, ok := global["recent_models"].(map[string]any)
-	require.True(t, ok)
-	require.Len(t, globalRecents[string(SelectedModelTypeLarge)].([]any), 1)
+	_, ok = global["recent_models"]
+	require.False(t, ok)
 
 	workspace := readConfigJSON(t, workspacePath)
 	models, ok := workspace["models"].(map[string]any)

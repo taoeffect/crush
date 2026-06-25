@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
@@ -121,6 +122,12 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	}
 
 	app.setupEvents()
+
+	// Initialize clipboard support. This is best-effort; if it fails
+	// (e.g., headless environment), clipboard operations will return nil.
+	if err := clipboard.Init(); err != nil {
+		slog.Warn("Clipboard initialization failed", "error", err)
+	}
 
 	// Check for updates in the background.
 	go app.checkForUpdates(ctx)
@@ -426,10 +433,10 @@ func (app *App) overrideModelsForNonInteractive(ctx context.Context, largeModel,
 		}
 		largeProviderID = found.provider
 		slog.Info("Overriding large model for non-interactive run", "provider", found.provider, "model", found.modelID)
-		app.config.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
+		app.config.OverridePreferredModel(config.SelectedModelTypeLarge, config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
-		}
+		})
 	}
 
 	// Override small model.
@@ -440,15 +447,15 @@ func (app *App) overrideModelsForNonInteractive(ctx context.Context, largeModel,
 			return err
 		}
 		slog.Info("Overriding small model for non-interactive run", "provider", found.provider, "model", found.modelID)
-		app.config.Config().Models[config.SelectedModelTypeSmall] = config.SelectedModel{
+		app.config.OverridePreferredModel(config.SelectedModelTypeSmall, config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
-		}
+		})
 
 	case largeModel != "":
 		// No small model specified, but large model was - use provider's default.
 		smallCfg := app.GetDefaultSmallModel(largeProviderID)
-		app.config.Config().Models[config.SelectedModelTypeSmall] = smallCfg
+		app.config.OverridePreferredModel(config.SelectedModelTypeSmall, smallCfg)
 	}
 
 	return app.AgentCoordinator.UpdateModels(ctx)

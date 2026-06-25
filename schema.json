@@ -427,6 +427,13 @@
           "type": "array",
           "description": "Paths to directories containing Agent Skills (folders with SKILL.md files)"
         },
+        "system_prompt_path": {
+          "type": "string",
+          "description": "Path to a file containing a custom system prompt for the coder agent",
+          "examples": [
+            ".crush/system-prompt.md"
+          ]
+        },
         "tui": {
           "$ref": "#/$defs/TUIOptions",
           "description": "Terminal user interface options"
@@ -505,6 +512,15 @@
           "description": "Show indeterminate progress updates during long operations",
           "default": true
         },
+        "compaction_method": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "llm"
+          ],
+          "description": "Controls how context compaction is handled. 'auto' uses backend-managed summarization. 'llm' enables LLM/user-driven compaction via context status injection.",
+          "default": "auto"
+        },
         "disable_notifications": {
           "type": "boolean",
           "description": "Deprecated: Use notification_style instead. Disable desktop notifications",
@@ -582,10 +598,19 @@
           "enum": [
             "openai",
             "openai-compat",
+            "openrouter",
+            "vercel",
             "anthropic",
-            "gemini",
+            "google",
             "azure",
-            "vertexai"
+            "bedrock",
+            "google-vertex",
+            "hyper",
+            "litellm",
+            "llamacpp",
+            "lmstudio",
+            "ollama",
+            "omlx"
           ],
           "description": "Provider type that determines the API format",
           "default": "openai"
@@ -628,6 +653,11 @@
         "flat_rate": {
           "type": "boolean",
           "description": "Flat-rate mode for this provider"
+        },
+        "discover_models": {
+          "type": "boolean",
+          "description": "Auto-discover models from /v1/models endpoint. When true with existing models they are merged (yours win)",
+          "default": true
         },
         "models": {
           "items": {
@@ -771,6 +801,16 @@
         "expires_at"
       ]
     },
+    "ToolGlob": {
+      "properties": {
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout for the glob tool call"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "ToolGrep": {
       "properties": {
         "timeout": {
@@ -832,6 +872,9 @@
         },
         "grep": {
           "$ref": "#/$defs/ToolGrep"
+        },
+        "glob": {
+          "$ref": "#/$defs/ToolGlob"
         },
         "web_search": {
           "$ref": "#/$defs/ToolWebSearch",
