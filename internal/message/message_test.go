@@ -2,6 +2,7 @@ package message
 
 import (
 	"context"
+	"database/sql"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -9,7 +10,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/pubsub"
-	"github.com/charmbracelet/crush/internal/session"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,12 +43,22 @@ func newTestService(t *testing.T, opts ...ServiceOption) (Service, string) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
-	sess, err := sessions.Create(t.Context(), "test")
-	require.NoError(t, err)
+	sessionID := createTestSession(t, q, "test")
 
 	svc := NewService(q, opts...)
-	return svc, sess.ID
+	return svc, sessionID
+}
+
+func createTestSession(t *testing.T, q db.Querier, title string) string {
+	t.Helper()
+
+	sess, err := q.CreateSession(t.Context(), db.CreateSessionParams{
+		ID:              uuid.New().String(),
+		ParentSessionID: sql.NullString{},
+		Title:           title,
+	})
+	require.NoError(t, err)
+	return sess.ID
 }
 
 // eventCollector consumes broker events into a slice in a goroutine
@@ -490,9 +501,7 @@ func TestFlush_WaitsForInFlightWrite(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
-	sess, err := sessions.Create(t.Context(), "test")
-	require.NoError(t, err)
+	sessionID := createTestSession(t, q, "test")
 
 	slow := &slowUpdateQuerier{
 		Querier: q,
@@ -502,7 +511,7 @@ func TestFlush_WaitsForInFlightWrite(t *testing.T) {
 	// Short debounce so the timer fires quickly.
 	svc := NewService(slow, WithDebounce(10*time.Millisecond))
 
-	msg, err := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
+	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
 	require.NoError(t, err)
 	msg.AppendContent("payload")
 	require.NoError(t, svc.Update(t.Context(), msg))
@@ -554,9 +563,7 @@ func TestFlushAll_WaitsForInFlightWrite(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
-	sess, err := sessions.Create(t.Context(), "test")
-	require.NoError(t, err)
+	sessionID := createTestSession(t, q, "test")
 
 	slow := &slowUpdateQuerier{
 		Querier: q,
@@ -565,7 +572,7 @@ func TestFlushAll_WaitsForInFlightWrite(t *testing.T) {
 	}
 	svc := NewService(slow, WithDebounce(10*time.Millisecond))
 
-	msg, err := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
+	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
 	require.NoError(t, err)
 	msg.AppendContent("payload")
 	require.NoError(t, svc.Update(t.Context(), msg))
@@ -647,9 +654,7 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 			t.Cleanup(func() { _ = conn.Close() })
 
 			q := db.New(conn)
-			sessions := session.NewService(q, conn)
-			sess, err := sessions.Create(t.Context(), "test")
-			require.NoError(t, err)
+			sessionID := createTestSession(t, q, "test")
 
 			// Replace the default broker with a tiny buffer + short
 			// must-deliver timeout so we can fully saturate from a
@@ -664,7 +669,7 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 			defer cancel()
 			sub := svc.Subscribe(subCtx)
 
-			msg, err := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
+			msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
 			require.NoError(t, err)
 
 			// Saturate the subscriber's buffer (capacity 1). The

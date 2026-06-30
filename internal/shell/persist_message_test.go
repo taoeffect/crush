@@ -1,11 +1,11 @@
 package shell
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -48,10 +48,13 @@ func TestPersistOutput_PersistsForExistingSession(t *testing.T) {
 	t.Cleanup(func() { conn.Close() })
 
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
 	messages := message.NewService(q)
 
-	sess, err := sessions.Create(t.Context(), "shell test")
+	sess, err := q.CreateSession(t.Context(), db.CreateSessionParams{
+		ID:              uuid.New().String(),
+		ParentSessionID: sql.NullString{},
+		Title:           "shell test",
+	})
 	require.NoError(t, err)
 
 	err = PersistOutput(t.Context(), messages, sess.ID, "cat file.txt", "hello", 0)
