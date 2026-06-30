@@ -422,7 +422,11 @@ func (s *ConfigStore) mutateInMemory(mutate func(*Config)) {
 func (s *ConfigStore) update(scope Scope, mutate func(*Config) map[string]any) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	return s.updateLocked(scope, mutate)
+}
 
+// updateLocked is the lock-free core of update. Caller must hold writeMu.
+func (s *ConfigStore) updateLocked(scope Scope, mutate func(*Config) map[string]any) error {
 	nc := s.Config().cloneForWrite()
 	fields := mutate(nc)
 	s.setConfig(nc)
@@ -492,42 +496,43 @@ func (s *ConfigStore) RemoveConfigField(scope Scope, key string) error {
 func (s *ConfigStore) UpdatePreferredModel(scope Scope, modelType SelectedModelType, model SelectedModel) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	return s.updatePreferredModelLocked(scope, modelType, model)
+}
 
+// updatePreferredModelLocked persists a preferred-model change. Caller must
+// hold writeMu.
+func (s *ConfigStore) updatePreferredModelLocked(scope Scope, modelType SelectedModelType, model SelectedModel) error {
 	persistedRecents, err := s.readRecentModelsFromScope(scope, modelType)
 	if err != nil {
 		return fmt.Errorf("failed to read recent models from %s scope: %w", scope, err)
 	}
-	updatedPersistedRecents, persistedRecentsChanged := nextRecentModelsFromList(persistedRecents, model)
+	return s.updateLocked(scope, func(c *Config) map[string]any {
+		return s.updatePreferredModelFields(c, modelType, model, persistedRecents)
+	})
+}
 
-	nc := s.Config().cloneForWrite()
-	if nc.Models == nil {
-		nc.Models = make(map[SelectedModelType]SelectedModel)
+// updatePreferredModelFields builds the fields map for persisting a preferred
+// model change. Shared between UpdatePreferredModel and direct updateLocked
+// callers (e.g. Load).
+func (s *ConfigStore) updatePreferredModelFields(c *Config, modelType SelectedModelType, model SelectedModel, persistedRecents []SelectedModel) map[string]any {
+	if c.Models == nil {
+		c.Models = make(map[SelectedModelType]SelectedModel)
 	}
-	nc.Models[modelType] = model
+	c.Models[modelType] = model
 
 	fields := map[string]any{
 		fmt.Sprintf("models.%s", modelType): model,
 	}
-	if updated, changed := nextRecentModels(nc, modelType, model); changed {
-		if nc.RecentModels == nil {
-			nc.RecentModels = make(map[SelectedModelType][]SelectedModel)
+	if updated, changed := nextRecentModels(c, modelType, model); changed {
+		if c.RecentModels == nil {
+			c.RecentModels = make(map[SelectedModelType][]SelectedModel)
 		}
-		nc.RecentModels[modelType] = updated
+		c.RecentModels[modelType] = updated
 	}
-	if persistedRecentsChanged {
-		fields[fmt.Sprintf("recent_models.%s", modelType)] = updatedPersistedRecents
+	if updated, changed := nextRecentModelsFromList(persistedRecents, model); changed {
+		fields[fmt.Sprintf("recent_models.%s", modelType)] = updated
 	}
-
-	s.setConfig(nc)
-	if err := s.writeConfigFields(scope, fields); err != nil {
-		return err
-	}
-	s.invalidateConfigFileCache(scope)
-
-	if path, err := s.configPath(scope); err == nil {
-		s.captureStalenessSnapshot(append(slices.Clone(s.loadedPaths), path))
-	}
-	return nil
+	return fields
 }
 
 var ErrNoModelChoicesToSave = errors.New("no model choices to save")
@@ -537,35 +542,52 @@ var ErrNoModelChoicesToSave = errors.New("no model choices to save")
 // Writes go to whichever writable scope (workspace or global) currently owns
 // the array; if neither scope has it on disk, no write is performed.
 func (s *ConfigStore) pruneInvalidRecentModels() error {
-	if s.config == nil {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.pruneInvalidRecentModelsLocked()
+}
+
+// pruneInvalidRecentModelsLocked is the lock-free core of
+// pruneInvalidRecentModels. Caller must hold writeMu.
+func (s *ConfigStore) pruneInvalidRecentModelsLocked() error {
+	cfg := s.Config()
+	if cfg == nil || len(cfg.RecentModels) == 0 {
 		return nil
 	}
-	for modelType, recents := range s.config.RecentModels {
+	for modelType, recents := range cfg.RecentModels {
 		valid := make([]SelectedModel, 0, len(recents))
-		for _, r := range recents {
-			if s.config.GetModel(r.Provider, r.Model) != nil {
-				valid = append(valid, r)
+		for _, recent := range recents {
+			if cfg.GetModel(recent.Provider, recent.Model) != nil {
+				valid = append(valid, recent)
 			}
 		}
-		if len(valid) == len(recents) {
+		if slices.EqualFunc(recents, valid, sameSelectedModel) {
 			continue
 		}
-		// In-memory always reflects the pruned list.
-		s.config.RecentModels[modelType] = valid
-		// Determine which scope owns the on-disk recent list and write
-		// only to that scope. Skip persistence if neither scope has the
-		// field (e.g. the array originated from a project-level config).
+
 		key := fmt.Sprintf("recent_models.%s", modelType)
 		var scope Scope
+		persist := true
 		switch {
 		case s.workspacePath != "" && s.HasConfigField(ScopeWorkspace, key):
 			scope = ScopeWorkspace
 		case s.HasConfigField(ScopeGlobal, key):
 			scope = ScopeGlobal
 		default:
-			continue
+			scope = ScopeGlobal
+			persist = false
 		}
-		if err := s.SetConfigField(scope, key, valid); err != nil {
+
+		if err := s.updateLocked(scope, func(c *Config) map[string]any {
+			if c.RecentModels == nil {
+				c.RecentModels = make(map[SelectedModelType][]SelectedModel)
+			}
+			c.RecentModels[modelType] = valid
+			if !persist {
+				return nil
+			}
+			return map[string]any{key: valid}
+		}); err != nil {
 			return fmt.Errorf("failed to prune recent_models.%s in %s scope: %w", modelType, scope, err)
 		}
 	}
@@ -1205,15 +1227,22 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 	s.overrides = overrides
 	s.workspacePath = workspacePath
 
-	// Mirror startup flow: setup models and agents against NEW config
+	// Mirror startup flow: setup models and agents against NEW config.
 	var setupErr error
 	if !cfg.IsConfigured() {
 		slog.Warn("No providers configured after reload")
 	} else {
-		if err := configureSelectedModels(s, providers, false); err != nil {
-			setupErr = fmt.Errorf("failed to configure selected models during reload: %w", err)
+		resolved, resolveErr := resolveSelectedModels(cfg, providers)
+		if resolveErr != nil {
+			setupErr = fmt.Errorf("failed to configure selected models during reload: %w", resolveErr)
 		} else {
-			s.SetupAgents()
+			cfg.Models[SelectedModelTypeLarge] = resolved.Large
+			cfg.Models[SelectedModelTypeSmall] = resolved.Small
+			if err := s.pruneInvalidRecentModelsLocked(); err != nil {
+				setupErr = fmt.Errorf("failed to prune invalid recent models during reload: %w", err)
+			} else {
+				s.SetupAgents()
+			}
 		}
 	}
 

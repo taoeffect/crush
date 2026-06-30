@@ -21,7 +21,7 @@
         "xhigh"
       ],
       "default_reasoning_effort": "high",
-      "supports_attachments": true
+      "supports_attachments": false
     },
     {
       "id": "deepseek-v4-pro",
@@ -55,9 +55,9 @@
     {
       "id": "glm-5",
       "name": "GLM-5",
-      "cost_per_1m_in": 0.89,
-      "cost_per_1m_out": 2.848,
-      "cost_per_1m_in_cached": 0.445,
+      "cost_per_1m_in": 0.86,
+      "cost_per_1m_out": 2.784,
+      "cost_per_1m_in_cached": 0.43,
       "cost_per_1m_out_cached": 0,
       "context_window": 202752,
       "default_max_tokens": 20275,
@@ -67,12 +67,12 @@
     {
       "id": "glm-5.1",
       "name": "GLM-5.1",
-      "cost_per_1m_in": 1.4,
-      "cost_per_1m_out": 4.4,
+      "cost_per_1m_in": 1.3,
+      "cost_per_1m_out": 4.3,
       "cost_per_1m_in_cached": 0.26,
       "cost_per_1m_out_cached": 0,
-      "context_window": 202800,
-      "default_max_tokens": 64000,
+      "context_window": 202000,
+      "default_max_tokens": 202000,
       "can_reason": true,
       "reasoning_levels": [
         "low",
@@ -80,23 +80,23 @@
         "high"
       ],
       "default_reasoning_effort": "medium",
-      "supports_attachments": true
+      "supports_attachments": false
     },
     {
       "id": "glm-5.2",
       "name": "GLM-5.2",
-      "cost_per_1m_in": 1.4,
-      "cost_per_1m_out": 4.4,
-      "cost_per_1m_in_cached": 0.26,
+      "cost_per_1m_in": 1.5,
+      "cost_per_1m_out": 4.5,
+      "cost_per_1m_in_cached": 0.3,
       "cost_per_1m_out_cached": 0,
-      "context_window": 1048576,
-      "default_max_tokens": 131072,
+      "context_window": 1000000,
+      "default_max_tokens": 128000,
       "can_reason": true,
       "reasoning_levels": [
         "high",
-        "max"
+        "xhigh"
       ],
-      "default_reasoning_effort": "max",
+      "default_reasoning_effort": "high",
       "supports_attachments": false
     },
     {
@@ -120,9 +120,9 @@
     {
       "id": "kimi-k2.5",
       "name": "Kimi K2.5",
-      "cost_per_1m_in": 0.473,
-      "cost_per_1m_out": 2.375,
-      "cost_per_1m_in_cached": 0.2365,
+      "cost_per_1m_in": 0.51,
+      "cost_per_1m_out": 2.67,
+      "cost_per_1m_in_cached": 0.255,
       "cost_per_1m_out_cached": 0,
       "context_window": 262144,
       "default_max_tokens": 26214,
@@ -270,9 +270,9 @@
     {
       "id": "qwen3-coder-480b-a35b-instruct-int4-mixed-ar",
       "name": "Qwen3 Coder 480B A35B Instruct INT4 Mixed AR",
-      "cost_per_1m_in": 0.525,
-      "cost_per_1m_out": 2.595,
-      "cost_per_1m_in_cached": 0.2625,
+      "cost_per_1m_in": 0.557,
+      "cost_per_1m_out": 2.545,
+      "cost_per_1m_in_cached": 0.2785,
       "cost_per_1m_out_cached": 0,
       "context_window": 106000,
       "default_max_tokens": 10600,

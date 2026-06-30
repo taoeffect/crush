@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/stretchr/testify/require"
@@ -754,6 +755,96 @@ func TestSetConfigFields_AutoReloadsAtomically(t *testing.T) {
 
 	// Verify both fields are reflected in memory.
 	require.True(t, store.config.Options.Debug)
+}
+
+func TestConfigStore_PruneInvalidRecentModels_WritesOwningScopeOnly(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global", "crush.json")
+	workspacePath := filepath.Join(dir, "workspace", ".crush", "crush.json")
+	recentGlobal := SelectedModel{Provider: "test-provider", Model: "global-valid"}
+	recentWorkspace := SelectedModel{Provider: "test-provider", Model: "workspace-valid"}
+	recentInvalid := SelectedModel{Provider: "test-provider", Model: "missing"}
+	require.NoError(t, os.MkdirAll(filepath.Dir(globalPath), 0o755))
+	require.NoError(t, os.WriteFile(globalPath, []byte(`{"recent_models":{"large":[{"provider":"test-provider","model":"global-valid"},{"provider":"test-provider","model":"missing"}],"small":[{"provider":"test-provider","model":"missing"}]}}`), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Dir(workspacePath), 0o755))
+	require.NoError(t, os.WriteFile(workspacePath, []byte(`{"recent_models":{"large":[{"provider":"test-provider","model":"workspace-valid"},{"provider":"test-provider","model":"missing"}]}}`), 0o600))
+
+	cfg := &Config{
+		Providers: csync.NewMapFrom(map[string]ProviderConfig{
+			"test-provider": {
+				ID: "test-provider",
+				Models: []catwalk.Model{
+					{ID: "global-valid"},
+					{ID: "workspace-valid"},
+				},
+			},
+		}),
+		RecentModels: map[SelectedModelType][]SelectedModel{
+			SelectedModelTypeLarge: {recentWorkspace, recentInvalid},
+			SelectedModelTypeSmall: {recentInvalid},
+		},
+	}
+	store := &ConfigStore{
+		config:         cfg,
+		globalDataPath: globalPath,
+		workspacePath:  workspacePath,
+	}
+
+	require.NoError(t, store.pruneInvalidRecentModels())
+
+	require.Equal(t, []SelectedModel{recentWorkspace}, store.Config().RecentModels[SelectedModelTypeLarge])
+	require.Empty(t, store.Config().RecentModels[SelectedModelTypeSmall])
+
+	workspace := readRecentModels(t, workspacePath)
+	workspaceLarge, ok := workspace[string(SelectedModelTypeLarge)].([]any)
+	require.True(t, ok)
+	require.Len(t, workspaceLarge, 1)
+	require.Equal(t, "workspace-valid", workspaceLarge[0].(map[string]any)["model"])
+
+	global := readRecentModels(t, globalPath)
+	globalLarge, ok := global[string(SelectedModelTypeLarge)].([]any)
+	require.True(t, ok)
+	require.Len(t, globalLarge, 2)
+	require.Equal(t, recentGlobal.Model, globalLarge[0].(map[string]any)["model"])
+	require.Equal(t, recentInvalid.Model, globalLarge[1].(map[string]any)["model"])
+	globalSmall, ok := global[string(SelectedModelTypeSmall)].([]any)
+	require.True(t, ok)
+	require.Empty(t, globalSmall)
+}
+
+func TestConfigStore_PruneInvalidRecentModels_SkipsNonWritableScope(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global", "crush.json")
+	beforeGlobal := []byte(`{}`)
+	require.NoError(t, os.MkdirAll(filepath.Dir(globalPath), 0o755))
+	require.NoError(t, os.WriteFile(globalPath, beforeGlobal, 0o600))
+
+	cfg := &Config{
+		Providers: csync.NewMapFrom(map[string]ProviderConfig{
+			"test-provider": {
+				ID:     "test-provider",
+				Models: []catwalk.Model{{ID: "valid"}},
+			},
+		}),
+		RecentModels: map[SelectedModelType][]SelectedModel{
+			SelectedModelTypeLarge: {{Provider: "test-provider", Model: "missing"}},
+		},
+	}
+	store := &ConfigStore{
+		config:         cfg,
+		globalDataPath: globalPath,
+	}
+
+	require.NoError(t, store.pruneInvalidRecentModels())
+	require.Empty(t, store.Config().RecentModels[SelectedModelTypeLarge])
+
+	afterGlobal, err := os.ReadFile(globalPath)
+	require.NoError(t, err)
+	require.Equal(t, string(beforeGlobal), string(afterGlobal))
 }
 
 func TestConfigStore_UpdatePreferredModel_WorkspaceScopeKeepsGlobalUnchanged(t *testing.T) {
