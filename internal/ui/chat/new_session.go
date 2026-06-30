@@ -32,7 +32,7 @@ func (r *NewSessionToolRenderContext) RenderTool(sty *styles.Styles, width int, 
 		return pendingTool(sty, "New Session", opts.Anim, false)
 	}
 
-	header := toolHeader(sty, opts.Status, "New Session", cappedWidth, opts.Compact)
+	header := toolHeader(sty, opts.Status, "New Session", cappedWidth, opts)
 	if opts.Compact {
 		return header
 	}
