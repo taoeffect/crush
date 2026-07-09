@@ -30,6 +30,8 @@ type Info struct {
 // v0.0.0-0.20251231235959-06c807842604
 var goInstallRegexp = regexp.MustCompile(`^v?\d+\.\d+\.\d+-\d+\.\d{14}-[0-9a-f]{12}$`)
 
+var taoEffectRegexp = regexp.MustCompile(`^(v?\d+\.\d+\.\d+)-taoeffect\.\d+$`)
+
 func (i Info) IsDevelopment() bool {
 	return i.Current == "devel" || i.Current == "unknown" || strings.Contains(i.Current, "dirty") || goInstallRegexp.MatchString(i.Current)
 }
@@ -41,6 +43,19 @@ func (i Info) IsDevelopment() bool {
 // If current is a pre-release and latest isn't, returns true.
 // If latest is a pre-release and current isn't, returns false.
 func (i Info) Available() bool {
+	currentBase, currentTaoEffect := taoEffectBase(i.Current)
+	latestBase, latestTaoEffect := taoEffectBase(i.Latest)
+	if currentTaoEffect || latestTaoEffect {
+		switch {
+		case currentTaoEffect && latestTaoEffect:
+			return i.Current != i.Latest
+		case currentTaoEffect && currentBase == i.Latest:
+			return false
+		case latestTaoEffect && latestBase == i.Current:
+			return false
+		}
+	}
+
 	cpr := strings.Contains(i.Current, "-")
 	lpr := strings.Contains(i.Latest, "-")
 	// current is pre release && latest isn't a prerelease
@@ -52,6 +67,14 @@ func (i Info) Available() bool {
 		return false
 	}
 	return i.Current != i.Latest
+}
+
+func taoEffectBase(version string) (string, bool) {
+	matches := taoEffectRegexp.FindStringSubmatch(version)
+	if matches == nil {
+		return version, false
+	}
+	return strings.TrimPrefix(matches[1], "v"), true
 }
 
 // Check checks if a new version is available.

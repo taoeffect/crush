@@ -37,6 +37,49 @@ func TestCheckForUpdate_Beta(t *testing.T) {
 	})
 }
 
+func TestCheckForUpdate_TaoEffect(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   string
+		latest    string
+		available bool
+	}{
+		{
+			name:      "fork version matches upstream base version",
+			current:   "v0.83.0-taoeffect.1",
+			latest:    "v0.83.0",
+			available: false,
+		},
+		{
+			name:      "upstream version matches fork base version",
+			current:   "v0.83.0",
+			latest:    "v0.83.0-taoeffect.1",
+			available: false,
+		},
+		{
+			name:      "newer fork version with same upstream base",
+			current:   "v0.83.0-taoeffect.1",
+			latest:    "v0.83.0-taoeffect.2",
+			available: true,
+		},
+		{
+			name:      "newer upstream base version",
+			current:   "v0.83.0-taoeffect.1",
+			latest:    "v0.84.0",
+			available: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info, err := Check(t.Context(), tt.current, testClient{tt.latest})
+			require.NoError(t, err)
+			require.NotNil(t, info)
+			require.Equal(t, tt.available, info.Available())
+		})
+	}
+}
+
 type testClient struct{ tag string }
 
 // Latest implements Client.
