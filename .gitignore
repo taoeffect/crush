@@ -60,3 +60,5 @@ completions/crush.*sh
 /.agents/
 /.tldr/
 /.tldrignore
+/.claude/
+/CLAUDE.md
