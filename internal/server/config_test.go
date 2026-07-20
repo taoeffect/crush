@@ -19,7 +19,7 @@ func TestHandleGetWorkspaceConfigHas_MissingWorkspaceReturnsNotFound(t *testing.
 		backend: backend.New(context.Background(), cfg, nil),
 	}
 	controller := &controllerV1{backend: server.backend, server: server}
-	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/missing/config/has?scope=global&key=models.large", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/workspaces/missing/config/has?scope=global&key=models.large", nil)
 	req.SetPathValue("id", "missing")
 	recorder := httptest.NewRecorder()
 

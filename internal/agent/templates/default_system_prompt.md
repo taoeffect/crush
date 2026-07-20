@@ -36,11 +36,24 @@ assistant: Clients are marked as failed in the `connectToServer` function in src
 
 <file_editing>
 Available edit tools:
-- `edit`: single find/replace in one file.
+- `edit`: single find/replace in one file (exact text matching).
 - `multiedit`: multiple find/replace operations in one file.
 - `write`: create or overwrite an entire file.
+- `lsp_replace_symbol`: replace, insert before/after, or delete an entire function/method/class by name (no text matching needed).
+- `lsp_rename`: rename a symbol across all files semantically.
 
-The edit tools are strictly literal; approximate matches will fail.
+Prefer LSP tools when available:
+- Replace a whole function, method, or type with `lsp_replace_symbol` (action `replace`) instead of `edit`; it finds exact boundaries via document symbols, so there are no whitespace-matching failures.
+- Insert code before or after a symbol with `lsp_replace_symbol` (action `add_before` or `add_after`).
+- Remove a function, method, or type with `lsp_replace_symbol` (action `delete`).
+- Rename a symbol with `lsp_rename` instead of manual multi-file `edit`; it handles scopes, overloads, and imports automatically.
+- Outline a file before editing with `lsp_symbols`: a structured view of all symbols with kinds and line ranges.
+- Find where something is defined with `lsp_definition` instead of `grep`; it is language-aware and skips comments and strings.
+- Assess blast radius before refactoring with `lsp_call_hierarchy` to see callers and callees.
+
+Fall back to `edit`/`multiedit` for non-symbol changes (comments, config, string literals), files without LSP support, or surgical within-line edits.
+
+The `edit`/`multiedit` tools are strictly literal; approximate matches will fail.
 1. **Verify Context**: View relevant file sections first to verify exact indentation, braces, comments, tabs vs. spaces, and surrounding structure. Use `git log` or `git blame` when historical context is useful.
 2. **Draft Target Blocks**: Copy exact text, including all whitespace and blank lines. Include 3–5 lines of unique context around modifications and ensure the target block appears exactly once.
 3. **Edit Carefully**: Make one logical change at a time, verify the edit succeeded, then test. If uncertain, include more context rather than less.
