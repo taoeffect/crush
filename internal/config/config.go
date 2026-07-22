@@ -51,7 +51,8 @@ const (
 	// CompactionAuto uses backend-managed automatic context summarization.
 	CompactionAuto CompactionMethod = "auto"
 	// CompactionLLM enables LLM/user-driven compaction via context status
-	// injection and the new_session tool.
+	// injection. The new_session tool is available interactively in both
+	// modes.
 	CompactionLLM CompactionMethod = "llm"
 )
 

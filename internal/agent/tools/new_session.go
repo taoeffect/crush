@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
+	"html/template"
 	"strings"
 
 	"charm.land/fantasy"
@@ -24,13 +26,35 @@ func (e *NewSessionError) Error() string {
 	return "new session requested"
 }
 
-//go:embed new_session.md
-var newSessionDescription []byte
+//go:embed new_session.md.tpl
+var newSessionDescriptionTmpl []byte
 
-func NewNewSessionTool() fantasy.AgentTool {
+var newSessionDescriptionTpl = template.Must(
+	template.New("newSessionDescription").
+		Parse(string(newSessionDescriptionTmpl)),
+)
+
+type newSessionDescriptionData struct {
+	ContextStatusEnabled bool
+	AutoSummarizeEnabled bool
+}
+
+func newSessionDescription(contextStatusEnabled, autoSummarizeEnabled bool) string {
+	var out bytes.Buffer
+	if err := newSessionDescriptionTpl.Execute(&out, newSessionDescriptionData{
+		ContextStatusEnabled: contextStatusEnabled,
+		AutoSummarizeEnabled: autoSummarizeEnabled,
+	}); err != nil {
+		// This should never happen.
+		panic("failed to execute new_session description template: " + err.Error())
+	}
+	return out.String()
+}
+
+func NewNewSessionTool(contextStatusEnabled, autoSummarizeEnabled bool) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		NewSessionToolName,
-		string(newSessionDescription),
+		newSessionDescription(contextStatusEnabled, autoSummarizeEnabled),
 		func(ctx context.Context, params NewSessionParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if strings.TrimSpace(params.Summary) == "" {
 				return fantasy.ToolResponse{

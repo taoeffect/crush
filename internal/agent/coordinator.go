@@ -750,8 +750,18 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
 
-	if c.cfg.Config().Options.CompactionMethod == config.CompactionLLM {
-		allTools = append(allTools, tools.NewNewSessionTool())
+	// The new_session tool is interactive-only and not available to
+	// sub-agents: the handoff it triggers is handled by the TUI, which never
+	// happens for a sub-agent run. Context status is only injected in llm
+	// compaction mode, so the description must match. Auto-summarize mirrors
+	// compactionFlags: always on in llm mode, otherwise honoring
+	// disable_auto_summarize.
+	if !isSubAgent && c.interactive {
+		method := c.cfg.Config().Options.CompactionMethod
+		contextStatusEnabled := method == config.CompactionLLM
+		autoSummarizeEnabled := method == config.CompactionLLM ||
+			!c.cfg.Config().Options.DisableAutoSummarize
+		allTools = append(allTools, tools.NewNewSessionTool(contextStatusEnabled, autoSummarizeEnabled))
 	}
 
 	// Question tool is interactive-only and not available to sub-agents.

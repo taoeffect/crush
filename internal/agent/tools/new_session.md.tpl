@@ -2,10 +2,18 @@ Creates a fresh session context to continue the current task with a clean slate.
 
 <when_to_use>
 Use this tool when you are working on a long-running task and want to avoid getting too close to the context limit.
+{{if .ContextStatusEnabled -}}
 A `<context_status>` block in the system prompt contains `used_pct`, `remaining_tokens`, and `context_window`.
 
 - By default, invoke `new_session` when `used_pct >= 75` (context is 75% full) per the instructions in the usage section.
 - The user may override the conditions for when and how this tool is called (e.g. "start a new session when there's only 5000 tokens remaining").
+{{else -}}
+{{if .AutoSummarizeEnabled -}}
+- Invoke `new_session` only when the user instructs you to.
+{{else -}}
+- Invoke `new_session` when the user asks for one, or when you judge the conversation has grown long enough that continuing risks degraded performance or lost context.
+{{end -}}
+{{end -}}
 - The user may also override how the summary context that's passed in to this tool is generated.
 </when_to_use>
 
