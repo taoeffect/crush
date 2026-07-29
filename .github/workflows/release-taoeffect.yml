@@ -170,12 +170,13 @@ jobs:
           }
 
           if (!previousTag) {
-            previousTag = run("git", ["tag", "--merged", currentTag, "--sort=-creatordate", "--list", "v*.*.*"])
+            previousTag = run("git", ["tag", "--merged", currentTag, "--sort=-creatordate", "--list", "v*.*.*-taoeffect.*"])
               .split("\n")
               .find((tag) => tag && tag !== currentTag) ?? "";
           }
 
           const range = previousTag ? `${previousTag}..${currentTag}` : currentTag;
+          console.log(`Release notes range: ${previousTag || "(repo start)"}..${currentTag}`);
           const commitMessages = run("git", ["log", "--format=%B%n---END COMMIT---", range]);
           const previousRelease = previousTag || "the beginning of the repository";
 
