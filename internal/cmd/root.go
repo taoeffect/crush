@@ -58,6 +58,8 @@ func init() {
 	rootCmd.PersistentFlags().StringP("sys-prompt", "p", "", "Use a custom system prompt file")
 	rootCmd.Flags().BoolP("help", "h", false, "Help")
 	rootCmd.Flags().BoolP("yolo", "y", false, "Automatically accept all permissions (dangerous mode)")
+	rootCmd.PersistentFlags().StringSlice("channels", nil, "MCP servers to enable as channels (repeatable), e.g. --channels server:webhook")
+	_ = rootCmd.PersistentFlags().MarkHidden("channels")
 	rootCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	rootCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
 	rootCmd.MarkFlagsMutuallyExclusive("session", "continue")
@@ -319,6 +321,7 @@ func setupLocalConfigStore(cmd *cobra.Command) (*config.ConfigStore, error) {
 	debug, _ := cmd.Flags().GetBool("debug")
 	yolo, _ := cmd.Flags().GetBool("yolo")
 	systemPromptPath, _ := cmd.Flags().GetString("sys-prompt")
+	channels, _ := cmd.Flags().GetStringSlice("channels")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 
 	cwd, err := ResolveCwd(cmd)
@@ -331,13 +334,14 @@ func setupLocalConfigStore(cmd *cobra.Command) (*config.ConfigStore, error) {
 		return nil, err
 	}
 
-	applyWorkspaceOverrides(store, yolo, systemPromptPath)
+	applyWorkspaceOverrides(store, yolo, systemPromptPath, channels)
 	return store, nil
 }
 
-func applyWorkspaceOverrides(store *config.ConfigStore, yolo bool, systemPromptPath string) {
+func applyWorkspaceOverrides(store *config.ConfigStore, yolo bool, systemPromptPath string, channels []string) {
 	store.Overrides().SkipPermissionRequests = yolo
 	store.Overrides().SystemPromptPath = systemPromptPath
+	store.Overrides().EnabledChannels = channels
 }
 
 // localSkillsDiscoveryConfig adapts a *config.ConfigStore to the inputs
@@ -395,6 +399,7 @@ func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func
 	debug, _ := cmd.Flags().GetBool("debug")
 	yolo, _ := cmd.Flags().GetBool("yolo")
 	systemPromptPath, _ := cmd.Flags().GetString("sys-prompt")
+	channels, _ := cmd.Flags().GetStringSlice("channels")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	ctx := cmd.Context()
 
@@ -414,6 +419,7 @@ func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func
 		SystemPromptPath: systemPromptPath,
 		Debug:            debug,
 		YOLO:             yolo,
+		Channels:         channels,
 		Version:          version.Version,
 		Env:              os.Environ(),
 	}
