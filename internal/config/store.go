@@ -1155,6 +1155,7 @@ func NewTestStore(cfg *Config, loadedPaths ...string) *ConfigStore {
 	return &ConfigStore{
 		config:      cfg,
 		loadedPaths: loadedPaths,
+		resolver:    NewShellVariableResolver(env.New()),
 	}
 }
 
@@ -1343,7 +1344,7 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 	migrateDisableNotifications()
 
 	configPaths := lookupConfigs(s.workingDir)
-	cfg, loadedPaths, err := loadFromConfigPaths(configPaths)
+	cfg, loadedPaths, err := loadFromConfigPaths(ctx, configPaths)
 	if err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
@@ -1373,6 +1374,17 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 		return fmt.Errorf("invalid hook configuration on reload: %w", err)
 	}
 
+	// Save current state for potential rollback BEFORE configureProviders,
+	// which may write to disk via RemoveConfigField (e.g. removing stale
+	// OAuth providers). Capturing after would snapshot a config that has
+	// already been mutated, and the rollback would restore corrupted state.
+	oldConfig := s.Config()
+	oldLoadedPaths := s.loadedPaths
+	oldResolver := s.resolver
+	oldKnownProviders := s.knownProviders
+	oldOverrides := s.overrides
+	oldWorkspacePath := s.workspacePath
+
 	// Preserve runtime overrides
 	overrides := s.overrides
 
@@ -1386,22 +1398,22 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 	// Reconfigure providers
 	env := env.New()
 	resolver := NewShellVariableResolver(env)
+
+	// Apply top-level env vars before configuring providers so variables
+	// like AWS_PROFILE are visible to the AWS SDK credential chain.
+	cfg.applyEnv(resolver)
+
 	providers, err := Providers(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to load providers during reload: %w", err)
+		if len(providers) == 0 {
+			return fmt.Errorf("failed to load providers during reload: %w", err)
+		}
+		slog.Warn("Reload continuing with the previously known providers", "error", err)
 	}
 
 	if err := cfg.configureProviders(ctx, s, env, resolver, providers); err != nil {
 		return fmt.Errorf("failed to configure providers during reload: %w", err)
 	}
-
-	// Save current state for potential rollback
-	oldConfig := s.Config()
-	oldLoadedPaths := s.loadedPaths
-	oldResolver := s.resolver
-	oldKnownProviders := s.knownProviders
-	oldOverrides := s.overrides
-	oldWorkspacePath := s.workspacePath
 
 	// Update store state BEFORE running model/agent setup (so they see new config)
 	s.setConfig(cfg)
@@ -1441,8 +1453,10 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 		return setupErr
 	}
 
-	// Rebuild staleness tracking
-	s.captureStalenessSnapshot(loadedPaths)
+	// Rebuild staleness tracking. Track every discovered config path, not
+	// just the ones that loaded, so a config file created after this reload
+	// is detected as a change on the next staleness check.
+	s.captureStalenessSnapshot(append(slices.Clone(configPaths), loadedPaths...))
 
 	return nil
 }

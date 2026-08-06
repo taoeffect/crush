@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -59,12 +60,33 @@ type kagiSearchResult struct {
 	List      []string `json:"list"`
 }
 
+// errSearchRateLimited reports that DuckDuckGo served a bot-check page
+// instead of results.
+var errSearchRateLimited = errors.New(
+	"DuckDuckGo is rate-limiting this machine. " +
+		"Do not retry or rephrase; wait a few minutes or fetch known URLs directly",
+)
+
+// ddgAnomalyMarkers are substrings of the bot-detection page DuckDuckGo
+// Lite serves (with HTTP 200) instead of results once a client trips its
+// rate limiter.  Parsing that page yields zero results, which would
+// otherwise masquerade as "your query found nothing".
+var ddgAnomalyMarkers = []string{
+	"anomaly-modal",
+	"/anomaly.js",
+	"Unfortunately, bots use DuckDuckGo too",
+}
+
+// ddgLiteEndpoint is a package var so tests can point the search at a
+// local httptest server.
+var ddgLiteEndpoint = "https://lite.duckduckgo.com/lite/?q="
+
 func searchDuckDuckGo(ctx context.Context, client *http.Client, query string, maxResults int) ([]SearchResult, error) {
 	if maxResults <= 0 {
 		maxResults = 10
 	}
 
-	searchURL := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(query)
+	searchURL := ddgLiteEndpoint + url.QueryEscape(query)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
 	if err != nil {
@@ -79,7 +101,13 @@ func searchDuckDuckGo(ctx context.Context, client *http.Client, query string, ma
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+	// A 202 from DuckDuckGo is the anomaly-challenge interstitial, not a
+	// result page; report throttling rather than parsing it into an
+	// empty result set.
+	if resp.StatusCode == http.StatusAccepted {
+		return nil, errSearchRateLimited
+	}
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("search failed with status code: %d", resp.StatusCode)
 	}
 
@@ -88,7 +116,14 @@ func searchDuckDuckGo(ctx context.Context, client *http.Client, query string, ma
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	return parseLiteSearchResults(string(body), maxResults)
+	content := string(body)
+	for _, marker := range ddgAnomalyMarkers {
+		if strings.Contains(content, marker) {
+			return nil, errSearchRateLimited
+		}
+	}
+
+	return parseLiteSearchResults(content, maxResults)
 }
 
 func searchKagi(ctx context.Context, client *http.Client, apiKey, query string, maxResults int) ([]SearchResult, error) {
