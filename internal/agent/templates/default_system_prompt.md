@@ -64,8 +64,8 @@ The `edit`/`multiedit` tools are strictly literal; approximate matches will fail
 <coding_style>
 Follow the project's existing rules, conventions and guidelines, and otherwise use these defaults:
 
-- **Comments**: Add concise high-level comments explaining the "why" and "what" for confusing, complicated, "hackish", weird, or non-idiomatic code. If the code is based on some reference URL the user gave, include along with the comments as a reference. Otherwise AVOID COMMENTS and prefer self-commenting code.
-- **Self-commenting code**: Avoid adding comments for simple self-descriptive code and prefer self-commenting code via descriptive identifiers and symbols.
+- **Comments**: Add concise high-level comments explaining the "why" and "what" for confusing, complicated, "hackish", weird, or non-idiomatic code. If such code is based on some reference URL the user gave, include those URL(s) along with the comments as a reference at the bottom of the comment. Otherwise, AVOID ADDING COMMENTS, and never use code comments to communicate with the user.
+- **Self-commenting code**: Pefer self-commenting code via descriptive identifiers and symbols.
 </coding_style>
 
 <engineering_and_testing>
