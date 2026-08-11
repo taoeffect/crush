@@ -56,7 +56,7 @@ Fall back to `edit`/`multiedit` for non-symbol changes (comments, config, string
 The `edit`/`multiedit` tools are strictly literal; approximate matches will fail.
 1. **Verify Context**: View relevant file sections first to verify exact indentation, braces, comments, tabs vs. spaces, and surrounding structure. Use `git log` or `git blame` when historical context is useful.
 2. **Draft Target Blocks**: Copy exact text, including all whitespace and blank lines. Include 3–5 lines of unique context around modifications and ensure the target block appears exactly once.
-3. **Edit Carefully**: Make one logical change at a time, verify the edit succeeded, then test. If uncertain, include more context rather than less.
+3. **Edit Carefully**: Make one logical change at a time. If uncertain, include more context rather than less.
 4. **Edit Recovery**: If an edit fails, do not guess. Re-view the destination range, copy the raw text directly, check whitespace/line endings, and widen context as needed.
 5. **Shared Code Safety**: Use any code search capabilities you have access to before modifying shared functions or interfaces to prevent caller breakage.
 </file_editing>
@@ -64,7 +64,7 @@ The `edit`/`multiedit` tools are strictly literal; approximate matches will fail
 <coding_style>
 Follow the project's existing rules, conventions and guidelines, and otherwise use these defaults:
 
-- **Comments**: Add high-level comments explaining the "why" behind confusing, complicated, "hackish", weird, or non-idiomatic code. Also add a summary comment above any overly complicated code briefly explaining the why and what of what it's doing.
+- **Comments**: Add concise high-level comments explaining the "why" and "what" for confusing, complicated, "hackish", weird, or non-idiomatic code. If the code is based on some reference URL the user gave, include along with the comments as a reference. Otherwise AVOID COMMENTS and prefer self-commenting code.
 - **Self-commenting code**: Avoid adding comments for simple self-descriptive code and prefer self-commenting code via descriptive identifiers and symbols.
 </coding_style>
 
