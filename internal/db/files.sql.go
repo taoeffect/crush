@@ -172,6 +172,12 @@ type ListFilesByPathAndSessionParams struct {
 	SessionID string `json:"session_id"`
 }
 
+// ListFilesByPathAndSession returns all file versions for a given path
+// scoped to a single session. This is used by CreateVersion() to determine
+// the next version number. The older ListFilesByPath query was not
+// session-scoped, which caused version numbers to leak across sessions
+// and trigger UNIQUE constraint violations when the new_session tool
+// created a fresh session that re-edited the same files.
 func (q *Queries) ListFilesByPathAndSession(ctx context.Context, arg ListFilesByPathAndSessionParams) ([]File, error) {
 	rows, err := q.query(ctx, q.listFilesByPathAndSessionStmt, listFilesByPathAndSession, arg.Path, arg.SessionID)
 	if err != nil {

@@ -287,12 +287,17 @@ func (m *UI) startLSPs(paths []string) tea.Cmd {
 // provided, this is a no-op so the current project model choices are
 // preserved. After applying any valid rows, the agent model is refreshed
 // once via UpdateAgentModel.
-func (m *UI) restoreSessionModels(sessionID string, models []session.SessionModel) tea.Cmd {
+//
+// The second return value reports whether any row was applied. Callers
+// use it to decide whether the legacy message-derived fallback
+// ([UI.restoreModelFromSession]) still needs to run for this session.
+func (m *UI) restoreSessionModels(sessionID string, models []session.SessionModel) (tea.Cmd, bool) {
 	if len(models) == 0 {
-		return nil
+		return nil, false
 	}
 	cfg := m.com.Workspace.Config()
 	applied := 0
+	var largeProvider string
 	for _, sm := range models {
 		switch sm.ModelType {
 		case config.SelectedModelTypeLarge, config.SelectedModelTypeSmall:
@@ -328,14 +333,22 @@ func (m *UI) restoreSessionModels(sessionID string, models []session.SessionMode
 			continue
 		}
 		applied++
+		if sm.ModelType == config.SelectedModelTypeLarge {
+			largeProvider = sm.Provider
+		}
 	}
 	if applied == 0 {
-		return nil
+		return nil, false
+	}
+	if largeProvider != "" {
+		// Keep the theme in sync with the restored large model's
+		// provider, the same way an interactive model selection does.
+		m.applyThemeForProvider(largeProvider)
 	}
 	return func() tea.Msg {
 		if err := m.com.Workspace.UpdateAgentModel(context.Background()); err != nil {
-			return util.ReportError(err)
+			return util.ReportError(err)()
 		}
 		return nil
-	}
+	}, true
 }

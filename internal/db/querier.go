@@ -23,6 +23,7 @@ type Querier interface {
 	GetFileByPathAndSession(ctx context.Context, arg GetFileByPathAndSessionParams) (File, error)
 	GetFileRead(ctx context.Context, arg GetFileReadParams) (ReadFile, error)
 	GetHourDayHeatmap(ctx context.Context) ([]GetHourDayHeatmapRow, error)
+	GetLastAssistantMessageBySession(ctx context.Context, sessionID string) (Message, error)
 	GetLastSession(ctx context.Context) (Session, error)
 	GetMessage(ctx context.Context, id string) (Message, error)
 	GetRecentActivity(ctx context.Context) ([]GetRecentActivityRow, error)
@@ -35,6 +36,12 @@ type Querier interface {
 	GetUsageByModel(ctx context.Context) ([]GetUsageByModelRow, error)
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	ListFilesByPath(ctx context.Context, path string) ([]File, error)
+	// ListFilesByPathAndSession returns all file versions for a given path
+	// scoped to a single session. This is used by CreateVersion() to determine
+	// the next version number. The older ListFilesByPath query was not
+	// session-scoped, which caused version numbers to leak across sessions
+	// and trigger UNIQUE constraint violations when the new_session tool
+	// created a fresh session that re-edited the same files.
 	ListFilesByPathAndSession(ctx context.Context, arg ListFilesByPathAndSessionParams) ([]File, error)
 	ListFilesBySession(ctx context.Context, sessionID string) ([]File, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)

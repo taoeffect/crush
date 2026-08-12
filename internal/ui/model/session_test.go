@@ -13,10 +13,10 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
-	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 )
@@ -24,8 +24,8 @@ import (
 // restoreTestWorkspace captures UpdatePreferredModel and UpdateAgentModel
 // invocations from restoreSessionModels.
 type restoreTestWorkspace struct {
-	workspace.Workspace
-	cfg                *config.Config
+	testWorkspace
+	messages           []message.Message
 	updatePreferred    []preferredCall
 	updatePreferredErr error
 	updatedAgent       int32
@@ -54,10 +54,14 @@ func (w *restoreTestWorkspace) UpdateAgentModel(_ context.Context) error {
 	return w.updateAgentErr
 }
 
+func (w *restoreTestWorkspace) ListMessages(context.Context, string) ([]message.Message, error) {
+	return w.messages, nil
+}
+
 func newRestoreUI(t *testing.T, cfg *config.Config) (*UI, *restoreTestWorkspace, *bytes.Buffer) {
 	t.Helper()
-	ws := &restoreTestWorkspace{cfg: cfg}
-	ui := &UI{com: &common.Common{Workspace: ws}}
+	ws := &restoreTestWorkspace{testWorkspace: testWorkspace{cfg: cfg}}
+	ui := New(&common.Common{Workspace: ws, Styles: ptr(styles.CharmtonePantera())}, "", false)
 
 	buf := &bytes.Buffer{}
 	prev := slog.Default()
@@ -75,14 +79,24 @@ func cfgWithModel(provider, model string) *config.Config {
 			{ID: model},
 		},
 	})
-	return &config.Config{Providers: providers}
+	return &config.Config{
+		Models:    map[config.SelectedModelType]config.SelectedModel{},
+		Providers: providers,
+		Options:   &config.Options{TUI: &config.TUIOptions{}},
+	}
 }
 
 func TestRestoreSessionModels_NoRowsIsNoOp(t *testing.T) {
 	ui, ws, _ := newRestoreUI(t, cfgWithModel("p", "m"))
 
-	require.Nil(t, ui.restoreSessionModels("sess", nil))
-	require.Nil(t, ui.restoreSessionModels("sess", []session.SessionModel{}))
+	cmd, restored := ui.restoreSessionModels("sess", nil)
+	require.Nil(t, cmd)
+	require.False(t, restored)
+
+	cmd, restored = ui.restoreSessionModels("sess", []session.SessionModel{})
+	require.Nil(t, cmd)
+	require.False(t, restored)
+
 	require.Empty(t, ws.updatePreferred)
 	require.Equal(t, int32(0), atomic.LoadInt32(&ws.updatedAgent))
 }
@@ -120,8 +134,9 @@ func TestRestoreSessionModels_AllValidAppliesAndRefreshesOnce(t *testing.T) {
 		},
 	}
 
-	cmd := ui.restoreSessionModels("sess", rows)
+	cmd, restored := ui.restoreSessionModels("sess", rows)
 	require.NotNil(t, cmd)
+	require.True(t, restored)
 	require.Len(t, ws.updatePreferred, 2)
 
 	for _, c := range ws.updatePreferred {
@@ -166,8 +181,9 @@ func TestRestoreSessionModels_UnavailableModelKeepsCurrentAndWarns(t *testing.T)
 		},
 	}
 
-	cmd := ui.restoreSessionModels("sess-X", rows)
+	cmd, restored := ui.restoreSessionModels("sess-X", rows)
 	require.NotNil(t, cmd, "valid row should still trigger refresh")
+	require.True(t, restored)
 	require.Len(t, ws.updatePreferred, 1)
 	require.Equal(t, config.SelectedModelTypeLarge, ws.updatePreferred[0].modelType)
 
@@ -195,8 +211,9 @@ func TestRestoreSessionModels_UnknownTypeIsSkipped(t *testing.T) {
 		},
 	}
 
-	cmd := ui.restoreSessionModels("sess-Y", rows)
+	cmd, restored := ui.restoreSessionModels("sess-Y", rows)
 	require.Nil(t, cmd, "no valid rows means no agent refresh")
+	require.False(t, restored, "no valid rows must leave the legacy fallback enabled")
 	require.Empty(t, ws.updatePreferred)
 	require.Equal(t, int32(0), atomic.LoadInt32(&ws.updatedAgent))
 
@@ -227,14 +244,117 @@ func TestRestoreSessionModels_AllInvalidLeavesEverythingUntouched(t *testing.T) 
 		},
 	}
 
-	cmd := ui.restoreSessionModels("sess-Z", rows)
+	cmd, restored := ui.restoreSessionModels("sess-Z", rows)
 	require.Nil(t, cmd)
+	require.False(t, restored)
 	require.Empty(t, ws.updatePreferred)
 	require.Equal(t, int32(0), atomic.LoadInt32(&ws.updatedAgent))
 
 	logOut := buf.String()
 	require.Contains(t, logOut, "provider_id=ghost")
 	require.Contains(t, logOut, "provider_id=ghost2")
+}
+
+func TestRestoreSessionModels_SyncsThemeToRestoredProvider(t *testing.T) {
+	cfg := cfgWithModel("hyper", "big")
+	ui, _, _ := newRestoreUI(t, cfg)
+	require.Equal(t, "default", ui.themeKey)
+
+	rows := []session.SessionModel{
+		{
+			SessionID:     "sess-T",
+			ModelType:     config.SelectedModelTypeLarge,
+			Provider:      "hyper",
+			Model:         "big",
+			SelectedModel: config.SelectedModel{Provider: "hyper", Model: "big"},
+		},
+	}
+
+	_, restored := ui.restoreSessionModels("sess-T", rows)
+	require.True(t, restored)
+	require.Equal(t, "hyper", ui.themeKey)
+}
+
+func TestRestoreSessionModels_SmallOnlyRowLeavesThemeAlone(t *testing.T) {
+	cfg := cfgWithModel("hyper", "tiny")
+	ui, _, _ := newRestoreUI(t, cfg)
+
+	rows := []session.SessionModel{
+		{
+			SessionID:     "sess-S",
+			ModelType:     config.SelectedModelTypeSmall,
+			Provider:      "hyper",
+			Model:         "tiny",
+			SelectedModel: config.SelectedModel{Provider: "hyper", Model: "tiny"},
+		},
+	}
+
+	_, restored := ui.restoreSessionModels("sess-S", rows)
+	require.True(t, restored)
+	require.Equal(t, "default", ui.themeKey,
+		"only the large model drives the theme")
+}
+
+// legacyRestoreCfg knows two models from the same provider: the one the
+// session_models table points at and the one the transcript points at.
+func legacyRestoreCfg() *config.Config {
+	cfg := cfgWithModel("p", "chosen")
+	pc, _ := cfg.Providers.Get("p")
+	pc.Models = append(pc.Models, catwalk.Model{ID: "transcript"})
+	cfg.Providers.Set("p", pc)
+	return cfg
+}
+
+func legacyTranscript() []message.Message {
+	return []message.Message{
+		{
+			Role:     message.Assistant,
+			Provider: "p",
+			Model:    "transcript",
+		},
+	}
+}
+
+func TestLoadSession_SessionModelsSuppressLegacyRestore(t *testing.T) {
+	ui, ws, _ := newRestoreUI(t, legacyRestoreCfg())
+	ws.messages = legacyTranscript()
+
+	ui.Update(loadSessionMsg{
+		session: &session.Session{ID: "sess-L"},
+		sessionModels: []session.SessionModel{
+			{
+				SessionID:     "sess-L",
+				ModelType:     config.SelectedModelTypeLarge,
+				Provider:      "p",
+				Model:         "chosen",
+				SelectedModel: config.SelectedModel{Provider: "p", Model: "chosen"},
+			},
+		},
+	})
+
+	require.Len(t, ws.updatePreferred, 1)
+	require.Equal(t, "chosen", ws.updatePreferred[0].model.Model,
+		"the transcript-derived fallback must not overwrite the restored model")
+}
+
+func TestLoadSession_NoSessionModelsFallsBackToTranscript(t *testing.T) {
+	ui, ws, _ := newRestoreUI(t, legacyRestoreCfg())
+	ws.messages = legacyTranscript()
+
+	ui.Update(loadSessionMsg{
+		session: &session.Session{ID: "sess-L"},
+	})
+
+	// The fallback restores the large model and, because the config has
+	// no small model pinned, also seeds the provider's default small one.
+	require.Len(t, ws.updatePreferred, 2)
+	for _, c := range ws.updatePreferred {
+		require.Equal(t, config.ScopeWorkspace, c.scope,
+			"the fallback must write at workspace scope, not global")
+	}
+	require.Equal(t, config.SelectedModelTypeLarge, ws.updatePreferred[0].modelType)
+	require.Equal(t, "transcript", ws.updatePreferred[0].model.Model)
+	require.Equal(t, config.SelectedModelTypeSmall, ws.updatePreferred[1].modelType)
 }
 
 func TestFileList(t *testing.T) {
