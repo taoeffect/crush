@@ -29,9 +29,7 @@ Install the Tao Effect fork from npm:
 
 ```bash
 # this is needed so that the binary can be downloaded and installed
-npm config set allow-scripts=@taoeffects/crush --location=user
-# install
-npm install -g @taoeffects/crush
+npm install -g --allow-scripts=@taoeffects/crush @taoeffects/crush@latest
 ```
 
 Fork releases use versions such as `0.70.0-taoeffect.1`: `0.70.0` identifies
