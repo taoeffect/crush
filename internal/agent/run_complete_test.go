@@ -316,7 +316,7 @@ func TestPopQueuedMessage_RunIDPublishesCancelledRunComplete(t *testing.T) {
 	popped, ok := a.PopQueuedMessage(sessionID)
 	require.True(t, ok)
 	require.Equal(t, "queued", popped.Prompt)
-	requireSingleCancelledRunComplete(t, ch, sessionID, "queued-run")
+	requireCancelledRunCompletes(t, ch, sessionID, "queued-run")
 }
 
 // TestRunCompletePublisher_MustDeliverOverTakesPublish exercises the
@@ -349,26 +349,36 @@ func TestRunCompletePublisher_MustDeliverOverTakesPublish(t *testing.T) {
 	}
 }
 
-// requireSingleCancelledRunComplete reads exactly one RunComplete from ch,
-// asserts it is the cancelled terminal event for runID, and verifies no
-// second event arrives. This observes the published pubsub event rather
-// than internal bookkeeping, which is the contract a `crush run` caller
-// blocking on the broker actually relies on.
-func requireSingleCancelledRunComplete(t *testing.T, ch <-chan pubsub.Event[notify.RunComplete], sessionID, runID string) {
+// requireCancelledRunCompletes reads exactly len(runIDs) RunCompletes from
+// ch, asserts each is a cancelled terminal event for one of runIDs, that
+// every runID appears exactly once, and that no further event arrives. It
+// observes the published pubsub events rather than internal bookkeeping,
+// which is the contract a `crush run` caller blocking on the broker
+// actually relies on. Arrival order is not asserted: the contract is that
+// every dropped prompt releases its own caller.
+func requireCancelledRunCompletes(t *testing.T, ch <-chan pubsub.Event[notify.RunComplete], sessionID string, runIDs ...string) {
 	t.Helper()
-	select {
-	case ev := <-ch:
-		require.Equal(t, runID, ev.Payload.RunID,
-			"the published RunComplete must carry the dropped queued prompt's RunID")
-		require.Equal(t, sessionID, ev.Payload.SessionID)
-		require.True(t, ev.Payload.Cancelled,
-			"a dropped queued prompt must publish a cancelled RunComplete")
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the cancelled RunComplete")
+	seen := make(map[string]struct{}, len(runIDs))
+	for range runIDs {
+		select {
+		case ev := <-ch:
+			require.Equal(t, sessionID, ev.Payload.SessionID)
+			require.True(t, ev.Payload.Cancelled,
+				"a dropped queued prompt must publish a cancelled RunComplete")
+			require.NotContains(t, seen, ev.Payload.RunID,
+				"a dropped queued prompt must publish exactly one cancelled RunComplete")
+			seen[ev.Payload.RunID] = struct{}{}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for cancelled RunCompletes: want %v, got %d", runIDs, len(seen))
+		}
+	}
+	for _, runID := range runIDs {
+		require.Contains(t, seen, runID,
+			"every dropped queued prompt must publish a cancelled RunComplete carrying its own RunID")
 	}
 	select {
 	case extra := <-ch:
-		t.Fatalf("expected exactly one RunComplete, got a second: %+v", extra.Payload)
+		t.Fatalf("expected exactly %d RunComplete(s), got another: %+v", len(runIDs), extra.Payload)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
@@ -387,13 +397,13 @@ func requireNoRunComplete(t *testing.T, ch <-chan pubsub.Event[notify.RunComplet
 }
 
 // TestClearQueue_QueuedRunIDPromptPublishesCancelledRunComplete proves the
-// terminal-event behavior end-to-end: a RunID-bearing prompt discarded
-// from the queue by the explicit ClearQueue path (which routes through
-// clearQueueAndNotify -> publishCanceledQueueDrops) must emit exactly one
-// cancelled RunComplete on the broker for its RunID. A queued prompt
-// without a RunID is dropped silently. This is the coverage the earlier
-// drain test lacked: it asserted the returned bookkeeping slice, not the
-// published event a `crush run` caller awaits.
+// terminal-event behavior end-to-end: a RunID-bearing prompt removed from
+// the queue by the explicit ClearQueue path (which routes through
+// publishCanceledQueueDrops) must emit exactly one cancelled RunComplete
+// on the broker for its RunID. A queued prompt without a RunID is dropped
+// silently. This is the coverage the earlier drain test lacked: it
+// asserted the returned bookkeeping slice, not the published event a
+// `crush run` caller awaits.
 func TestClearQueue_QueuedRunIDPromptPublishesCancelledRunComplete(t *testing.T) {
 	t.Parallel()
 
@@ -417,12 +427,225 @@ func TestClearQueue_QueuedRunIDPromptPublishesCancelledRunComplete(t *testing.T)
 		{SessionID: sessionID, RunID: "run-queued", Prompt: "queued", acceptSeq: 2},
 	})
 
-	a.ClearQueue(sessionID)
+	drained := a.ClearQueue(sessionID)
+	require.Len(t, drained, 2)
+	require.Equal(t, []string{"no-runid", "queued"},
+		[]string{drained[0].Prompt, drained[1].Prompt},
+		"the drain must report every removed prompt, RunID-bearing or not")
 
-	requireSingleCancelledRunComplete(t, ch, sessionID, "run-queued")
+	requireCancelledRunCompletes(t, ch, sessionID, "run-queued")
 
 	_, ok := a.messageQueue.Get(sessionID)
 	require.False(t, ok, "ClearQueue must clear the queue")
+}
+
+// TestClearQueue_PublishesCancelledRunCompleteForEveryRunIDBearingDrop
+// pins the loop in publishCanceledQueueDrops rather than its first
+// iteration: one drain removes the whole queue, so it can retire any
+// number of RunID-bearing prompts at once — a burst of scripted
+// `crush run` submissions taken off the queue by a single Escape. Each of
+// those callers blocks until a RunComplete carrying its own RunID
+// arrives, so publishing only the first drop leaves every caller behind
+// it hanging until connection teardown. The interleaved RunID-less prompt
+// must not consume a publish of its own.
+func TestClearQueue_PublishesCancelledRunCompleteForEveryRunIDBearingDrop(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	broker := pubsub.NewBroker[notify.RunComplete]()
+	t.Cleanup(broker.Shutdown)
+
+	a := NewSessionAgent(SessionAgentOptions{
+		Sessions:    env.sessions,
+		Messages:    env.messages,
+		RunComplete: broker,
+	}).(*sessionAgent)
+
+	subCtx, subCancel := context.WithCancel(t.Context())
+	defer subCancel()
+	ch := broker.Subscribe(subCtx)
+
+	const sessionID = "clear-many-queued-runids"
+	a.messageQueue.Set(sessionID, []SessionAgentCall{
+		{SessionID: sessionID, RunID: "run-a", Prompt: "first", acceptSeq: 1},
+		{SessionID: sessionID, Prompt: "no-runid", acceptSeq: 2},
+		{SessionID: sessionID, RunID: "run-b", Prompt: "second", acceptSeq: 3},
+	})
+
+	require.Len(t, a.ClearQueue(sessionID), 3,
+		"the drain must report every removed prompt, RunID-bearing or not")
+
+	requireCancelledRunCompletes(t, ch, sessionID, "run-a", "run-b")
+}
+
+// TestClearQueue_DrainsInOrderWithOwnedAttachments pins the
+// drain-and-return contract the Escape gesture depends on: the clear
+// reports every message it removed, oldest to newest, with attachments
+// whose bytes the caller owns, and it deletes the queue map entry. An
+// empty queue drains to nothing.
+func TestClearQueue_DrainsInOrderWithOwnedAttachments(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	a := NewSessionAgent(SessionAgentOptions{
+		Sessions: env.sessions,
+		Messages: env.messages,
+	}).(*sessionAgent)
+
+	const sessionID = "clear-drain"
+	content := []byte("oldest content")
+	a.messageQueue.Set(sessionID, []SessionAgentCall{
+		{
+			SessionID: sessionID,
+			Prompt:    "oldest",
+			Attachments: []message.Attachment{{
+				FilePath: "/tmp/oldest.txt",
+				FileName: "oldest.txt",
+				MimeType: "text/plain",
+				Content:  content,
+			}},
+		},
+		{SessionID: sessionID, Prompt: "middle"},
+		{SessionID: sessionID, Prompt: "newest"},
+	})
+
+	drained := a.ClearQueue(sessionID)
+	require.Len(t, drained, 3)
+	require.Equal(t, []string{"oldest", "middle", "newest"},
+		[]string{drained[0].Prompt, drained[1].Prompt, drained[2].Prompt},
+		"the drain must preserve queue order, oldest to newest")
+	require.Equal(t, []message.Attachment{{
+		FilePath: "/tmp/oldest.txt",
+		FileName: "oldest.txt",
+		MimeType: "text/plain",
+		Content:  []byte("oldest content"),
+	}}, drained[0].Attachments)
+
+	content[0] = 'X'
+	require.Equal(t, []byte("oldest content"), drained[0].Attachments[0].Content,
+		"the drained attachment content must not alias the queued call")
+
+	_, ok := a.messageQueue.Get(sessionID)
+	require.False(t, ok, "the drain must delete the queue map entry")
+	require.Nil(t, a.ClearQueue(sessionID), "draining an empty queue returns nothing")
+}
+
+// TestClearQueue_HoldsSessionDispatchMutex pins the synchronization the
+// returned payload requires: the drain removes messages the caller then
+// acts on, so it must be atomic against the run handoff and the
+// PrepareStep drain — a message reported as drained can never also have
+// been started. The pre-drain implementation returned nothing and skipped
+// the mutex, which was unobservable only because the content was thrown
+// away.
+func TestClearQueue_HoldsSessionDispatchMutex(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	a := NewSessionAgent(SessionAgentOptions{
+		Sessions: env.sessions,
+		Messages: env.messages,
+	}).(*sessionAgent)
+
+	const sessionID = "clear-dispatch-mutex"
+	a.messageQueue.Set(sessionID, []SessionAgentCall{
+		{SessionID: sessionID, Prompt: "queued"},
+	})
+
+	mu := a.sessionMu(sessionID)
+	mu.Lock()
+	started := make(chan struct{})
+	done := make(chan []QueuedMessage, 1)
+	go func() {
+		close(started)
+		done <- a.ClearQueue(sessionID)
+	}()
+	// Without waiting for the goroutine to reach the call, the negative
+	// window below is satisfied by a goroutine that was never scheduled —
+	// which is exactly what happens under -race load, and it would pass with
+	// the mutex removed.
+	<-started
+
+	select {
+	case <-done:
+		mu.Unlock()
+		t.Fatal("ClearQueue drained the queue without the session dispatch mutex")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	mu.Unlock()
+	select {
+	case drained := <-done:
+		require.Len(t, drained, 1)
+		require.Equal(t, "queued", drained[0].Prompt)
+	case <-time.After(5 * time.Second):
+		t.Fatal("ClearQueue never completed after the dispatch mutex was released")
+	}
+}
+
+// TestSummarize_QueuePromotionHoldsSessionDispatchMutex pins the
+// synchronization of the promotion at the end of Summarize. The tail
+// releases the active request first, so the session reads idle for the
+// whole promotion: a submission landing in that window takes Run's
+// idle-with-queue branch, which swaps the submission into the queue and
+// starts the queue head. Promoting without the dispatch mutex writes the
+// tail's stale pre-swap snapshot back over that swap — the submission is
+// wiped from the queue (never run, no terminal RunComplete for its RunID)
+// and the head, already active, is re-queued and runs a second time.
+func TestSummarize_QueuePromotionHoldsSessionDispatchMutex(t *testing.T) {
+	t.Parallel()
+
+	sa, env := newStreamTestAgent(t)
+
+	sess, err := env.sessions.Create(t.Context(), "session")
+	require.NoError(t, err)
+	// Summarize returns early on an empty session.
+	_, err = env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "history"},
+		},
+	})
+	require.NoError(t, err)
+
+	sa.enqueueCall(SessionAgentCall{SessionID: sess.ID, Prompt: "queued"})
+
+	mu := sa.sessionMu(sess.ID)
+	mu.Lock()
+
+	done := make(chan error, 1)
+	go func() { done <- sa.Summarize(context.WithoutCancel(t.Context()), sess.ID, nil, nil) }()
+
+	// Persisting the summary on the session is the last step before the
+	// tail, so once it lands the only work left is the promotion.
+	require.Eventually(t, func() bool {
+		s, err := env.sessions.Get(t.Context(), sess.ID)
+		return err == nil && s.SummaryMessageID != ""
+	}, 10*time.Second, 10*time.Millisecond,
+		"summarize never reached its queue-promotion tail")
+
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, 1, sa.QueuedPrompts(sess.ID),
+		"the summarize tail dequeued the queue head without the session dispatch mutex")
+
+	mu.Unlock()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Summarize never completed after the dispatch mutex was released")
+	}
+
+	require.Equal(t, 0, sa.QueuedPrompts(sess.ID),
+		"the queued prompt must be promoted once the lock is available")
+	msgs, err := env.messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
+	var ranQueued bool
+	for _, msg := range msgs {
+		if msg.Role == message.User && msg.Content().String() == "queued" {
+			ranQueued = true
+		}
+	}
+	require.True(t, ranQueued, "the promoted prompt must have run as its own turn")
 }
 
 // TestCancel_PreservesQueuedPrompts is the regression test for issue
@@ -510,7 +733,7 @@ func TestCancelAll_ShutdownDiscardsQueueAndNotifies(t *testing.T) {
 
 	a.CancelAll()
 
-	requireSingleCancelledRunComplete(t, ch, sessionID, "run-queued")
+	requireCancelledRunCompletes(t, ch, sessionID, "run-queued")
 	require.Equal(t, 0, a.QueuedPrompts(sessionID),
 		"shutdown must discard queued prompts it can no longer run")
 }
@@ -547,7 +770,7 @@ func TestCancelAll_ShutdownDiscardsQueueOnIdleSession(t *testing.T) {
 
 	a.CancelAll()
 
-	requireSingleCancelledRunComplete(t, ch, sessionID, "run-queued")
+	requireCancelledRunCompletes(t, ch, sessionID, "run-queued")
 	require.Equal(t, 0, a.QueuedPrompts(sessionID),
 		"shutdown must discard the queue of a session left idle by a cancel")
 }
@@ -587,7 +810,7 @@ func TestCancelAll_SummarizeKeyClearsSessionQueue(t *testing.T) {
 
 	a.CancelAll()
 
-	requireSingleCancelledRunComplete(t, ch, sessionID, "run-queued")
+	requireCancelledRunCompletes(t, ch, sessionID, "run-queued")
 	require.Equal(t, 0, a.QueuedPrompts(sessionID),
 		"the summarize key must be normalized to the session whose queue it owns")
 }
