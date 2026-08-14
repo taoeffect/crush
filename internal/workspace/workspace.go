@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
+	"github.com/charmbracelet/crush/internal/agent"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
@@ -154,6 +155,14 @@ type Workspace interface {
 	AgentQueuedPrompts(sessionID string) int
 	AgentQueuedPromptsList(sessionID string) []string
 	AgentClearQueue(sessionID string)
+	// AgentPopQueuedMessage removes the newest queued message for the
+	// session and returns it. The bool reports whether anything was
+	// queued; an uninitialized agent is reported as an empty queue, not
+	// an error, so the operation behaves the same in both modes. The
+	// error is reserved for a transport or backend failure, and because
+	// the pop is destructive it may be raised after the message was
+	// already removed.
+	AgentPopQueuedMessage(sessionID string) (agent.QueuedMessage, bool, error)
 	AgentSummarize(ctx context.Context, sessionID string) error
 	UpdateAgentModel(ctx context.Context) error
 	InitCoderAgent(ctx context.Context) error

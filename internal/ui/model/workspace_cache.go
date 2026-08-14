@@ -25,11 +25,16 @@ package model
 // Update, no model mutation inside commands).
 
 import (
+	"fmt"
+	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/charmbracelet/crush/internal/agent"
+	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/crush/internal/workspace"
 )
 
@@ -97,6 +102,20 @@ type promptQueueMsg struct {
 // started a run or was enqueued behind one), so busy and queue state should
 // be re-fetched.
 type agentRunSubmittedMsg struct{}
+
+// queuedMessagePoppedMsg delivers an off-thread queued-message pop result.
+type queuedMessagePoppedMsg struct {
+	forSession string
+	message    agent.QueuedMessage
+	found      bool
+	err        error
+}
+
+// promptQueueClearedMsg reports that an off-thread queue clear finished for
+// the session, so the memoized queue can be emptied and re-fetched.
+type promptQueueClearedMsg struct {
+	forSession string
+}
 
 // agentModelChangedMsg reports that the coordinator's model was updated
 // (model selection, thinking toggle, reasoning effort), so the memoized
@@ -270,6 +289,218 @@ func (m *UI) applyPromptQueue(msg promptQueueMsg) []tea.Cmd {
 		m.renderPills()
 	}
 	return nil
+}
+
+// noQueuedMessages is the banner shown when a pop finds nothing to restore,
+// either from the memoized count or from the workspace itself.
+const noQueuedMessages = "No queued messages."
+
+// popQueuedMessage removes the newest queued message off the Update
+// goroutine. It is single-flight: the pop mutates the agent queue, so a
+// second dispatch before the first result lands would remove a second
+// message that no apply path can restore. An empty memoized queue is
+// answered from the cache — the pop is an HTTP round-trip in client/server
+// mode, and this file exists to keep those off key presses the cache can
+// answer — with a banner, because a key that silently does nothing reads as
+// a broken binding.
+func (m *UI) popQueuedMessage() tea.Cmd {
+	if m.queuedPopInFlight {
+		return nil
+	}
+	if m.promptQueue == 0 {
+		return util.ReportInfo(noQueuedMessages)
+	}
+	if !m.hasSession() || m.com == nil || m.com.Workspace == nil {
+		return nil
+	}
+	m.queuedPopInFlight = true
+	ws := m.com.Workspace
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		queued, found, err := ws.AgentPopQueuedMessage(sessionID)
+		return queuedMessagePoppedMsg{
+			forSession: sessionID,
+			message:    queued,
+			found:      found,
+			err:        err,
+		}
+	}
+}
+
+// applyQueuedMessagePop restores a popped message and supersedes stale queue
+// reads. It runs on the Update goroutine.
+func (m *UI) applyQueuedMessagePop(msg queuedMessagePoppedMsg) []tea.Cmd {
+	m.queuedPopInFlight = false
+	if msg.err != nil {
+		// The failure may have been raised after the server already
+		// removed the message (response read/decode failure, dropped
+		// connection), so from here the queue state is unknown: re-fetch
+		// it instead of serving a count that may be one too high, and do
+		// not promise the user their message is still queued.
+		slog.Error("Failed to pop queued message",
+			"session_id", msg.forSession, "error", msg.err)
+		m.invalidatePromptQueue()
+		cmds := []tea.Cmd{util.ReportError(fmt.Errorf("%w (it may have left the queue anyway)", msg.err))}
+		if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return cmds
+	}
+	if !msg.found {
+		if msg.forSession != m.currentSessionID() {
+			// Nothing was popped and the result belongs to a session
+			// the user has left: it says nothing about the queue now on
+			// screen, so leave that queue and the editor alone.
+			return nil
+		}
+		// The pop only runs with a non-empty memoized queue, so the
+		// queue drained while the request was in flight (the agent
+		// dequeued it, or another client cleared it). The memoized
+		// count is known wrong: supersede it and re-fetch, and say why
+		// the editor stayed empty.
+		m.invalidatePromptQueue()
+		cmds := []tea.Cmd{util.ReportInfo(noQueuedMessages)}
+		if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return cmds
+	}
+	if msg.forSession != m.currentSessionID() {
+		// The pop raced a session switch. It is destructive at the agent
+		// layer — the message is already out of that session's queue and
+		// cannot be put back — so park it instead of dropping it, and
+		// restore it the next time that session is loaded. Restoring it
+		// into the editor here would offer a prompt written for another
+		// session to the current one.
+		slog.Warn("Parking popped queued message after session switch",
+			"for_session", msg.forSession, "current_session", m.currentSessionID())
+		if m.queuedPopOrphans == nil {
+			m.queuedPopOrphans = make(map[string]agent.QueuedMessage, 1)
+		}
+		m.queuedPopOrphans[msg.forSession] = msg.message
+		return []tea.Cmd{util.ReportWarn("Session changed: the popped message will be restored when you return to that session.")}
+	}
+
+	cmds, appended := m.restorePoppedMessage(msg.message)
+	if appended {
+		cmds = append(cmds, util.ReportWarn("Input field was not empty: appended the popped queued message below your text."))
+	}
+
+	m.invalidatePromptQueue()
+	if len(m.promptQueueItems) > 0 {
+		m.promptQueueItems = m.promptQueueItems[:len(m.promptQueueItems)-1]
+	}
+	m.promptQueue = len(m.promptQueueItems)
+	m.promptQueueCheckedAt = time.Now()
+	m.updateLayoutAndSize()
+
+	if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return cmds
+}
+
+// clearQueuedMessages discards every prompt queued for the session off the
+// Update goroutine (the workspace call is a synchronous HTTP round-trip in
+// client/server mode), delivering a promptQueueClearedMsg. The memoized
+// queue is deliberately not zeroed here: no caller needs an optimistic
+// value, and emptying the cache before the clear lands would let a queue
+// fetch dispatched during the round-trip repopulate the pill.
+func (m *UI) clearQueuedMessages() tea.Cmd {
+	if !m.hasSession() || m.com == nil || m.com.Workspace == nil {
+		return nil
+	}
+	ws := m.com.Workspace
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		ws.AgentClearQueue(sessionID)
+		return promptQueueClearedMsg{forSession: sessionID}
+	}
+}
+
+// applyPromptQueueCleared empties the memoized queue once a clear has landed
+// and supersedes queue reads started before it. Runs on the Update
+// goroutine.
+func (m *UI) applyPromptQueueCleared(msg promptQueueClearedMsg) []tea.Cmd {
+	if msg.forSession != m.currentSessionID() {
+		// The clear raced a session switch, so it says nothing about the
+		// queue now on screen; that session's own reads stay authoritative.
+		return nil
+	}
+	// Bump the generation so a fetch started before the clear cannot land
+	// and repopulate the pill it just emptied.
+	m.invalidatePromptQueue()
+	hadQueue := m.promptQueue > 0 || len(m.promptQueueItems) > 0
+	m.promptQueueItems = nil
+	m.promptQueue = 0
+	m.promptQueueCheckedAt = time.Now()
+	if hadQueue {
+		m.updateLayoutAndSize()
+	}
+
+	cmds := []tea.Cmd{util.ReportInfo("Queued messages cleared.")}
+	if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return cmds
+}
+
+// restorePoppedMessage puts a popped queued message back into the editor and
+// reports whether it had to be appended below existing text. Shared by the
+// pop apply path and the parked-restore path, both of which run after the
+// message has already left the agent queue: it can be neither refused nor
+// re-queued, so nothing here may drop it.
+//
+// The key handler refuses to pop while the editor holds text, but that check
+// ran before the round-trip (an HTTP POST in client/server mode), and a
+// parked message is restored into whatever the editor holds on session load.
+// Either way an existing draft must survive, so the prompt is appended below
+// it rather than overwriting it.
+func (m *UI) restorePoppedMessage(queued agent.QueuedMessage) (cmds []tea.Cmd, appended bool) {
+	prevHeight := m.textarea.Height()
+	if draft := m.textarea.Value(); draft != "" {
+		appended = true
+		m.textarea.MoveToEnd()
+		if !strings.HasSuffix(draft, "\n") {
+			m.textarea.InsertRune('\n')
+		}
+		m.textarea.InsertString(queued.Prompt)
+		m.textarea.MoveToEnd()
+		// Bang mode is not re-synced: the "!" prefix that drives it belongs
+		// to the draft, which is unchanged, and the restored prompt is no
+		// longer at the start of the value.
+	} else {
+		m.textarea.SetValue(queued.Prompt)
+		m.syncBangModeFromTextarea()
+		m.textarea.MoveToEnd()
+	}
+	m.promptHistory.index = -1
+	m.promptHistory.draft = m.textarea.Value()
+	for _, attachment := range queued.Attachments {
+		m.attachments.Update(attachment)
+	}
+	return []tea.Cmd{m.updateTextareaWithPrevHeight(nil, prevHeight)}, appended
+}
+
+// restoreParkedPop restores the queued message parked when a pop result
+// landed after a session switch (see applyQueuedMessagePop). Called on
+// session load, so the message comes back the first time the user returns to
+// the session it was popped from. At most one message can be parked per
+// session: the pop is single-flight, and this clears the entry on the load
+// that must precede any further pop for that session.
+func (m *UI) restoreParkedPop() tea.Cmd {
+	sessionID := m.currentSessionID()
+	queued, ok := m.queuedPopOrphans[sessionID]
+	if !ok {
+		return nil
+	}
+	delete(m.queuedPopOrphans, sessionID)
+	cmds, appended := m.restorePoppedMessage(queued)
+	warn := "Restored the queued message you popped before switching sessions."
+	if appended {
+		warn = "Appended the queued message you popped before switching sessions below your text."
+	}
+	return tea.Batch(append(cmds, util.ReportWarn(warn))...)
 }
 
 // staleWorkspaceRefreshCmds is the TTL backstop, called at the tail of

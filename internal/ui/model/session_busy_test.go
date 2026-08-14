@@ -2,14 +2,19 @@ package model
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -19,6 +24,7 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/dialog"
+	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/crush/internal/workspace"
 )
 
@@ -29,13 +35,15 @@ import (
 type countingWorkspace struct {
 	workspace.Workspace
 
-	ready     bool
-	agentBusy bool
-	yolo      bool
-	queued    []string
-	model     workspace.AgentModel
-	lspStates map[string]workspace.LSPClientInfo
-	lspDiags  map[string]lsp.DiagnosticCounts
+	ready          bool
+	agentBusy      bool
+	yolo           bool
+	queued         []string
+	queuedMessages []agent.QueuedMessage
+	popErr         error
+	model          workspace.AgentModel
+	lspStates      map[string]workspace.LSPClientInfo
+	lspDiags       map[string]lsp.DiagnosticCounts
 
 	readyCalls      int
 	agentBusyCalls  int
@@ -44,6 +52,7 @@ type countingWorkspace struct {
 	permCalls       int
 	permSetCalls    int
 	clearQueueCalls int
+	popQueueCalls   int
 	cancelCalls     int
 	modelCalls      int
 	lspStateCalls   int
@@ -79,7 +88,27 @@ func (w *countingWorkspace) PermissionSetSkipRequests(skip bool) {
 }
 
 func (w *countingWorkspace) AgentClearQueue(string) { w.clearQueueCalls++; w.queued = nil }
-func (w *countingWorkspace) AgentCancel(string)     { w.cancelCalls++ }
+func (w *countingWorkspace) AgentPopQueuedMessage(string) (agent.QueuedMessage, bool, error) {
+	w.popQueueCalls++
+	if w.popErr != nil {
+		return agent.QueuedMessage{}, false, w.popErr
+	}
+	if len(w.queuedMessages) == 0 {
+		return agent.QueuedMessage{}, false, nil
+	}
+	last := len(w.queuedMessages) - 1
+	queued := w.queuedMessages[last]
+	w.queuedMessages = w.queuedMessages[:last]
+	if len(w.queued) > 0 {
+		w.queued = w.queued[:len(w.queued)-1]
+	}
+	return queued, true, nil
+}
+
+// AgentCancel mirrors production: agent.sessionAgent.Cancel ends the turn
+// in progress and deliberately leaves the message queue alone, so w.queued
+// must stay untouched here. Only AgentClearQueue discards queued prompts.
+func (w *countingWorkspace) AgentCancel(string) { w.cancelCalls++ }
 
 func (w *countingWorkspace) AgentModel() workspace.AgentModel {
 	w.modelCalls++
@@ -122,7 +151,7 @@ func (w *countingWorkspace) syncProbes() int {
 func (w *countingWorkspace) resetCounters() {
 	w.readyCalls, w.agentBusyCalls = 0, 0
 	w.queuedCalls, w.queueListCalls, w.permCalls = 0, 0, 0
-	w.permSetCalls, w.clearQueueCalls, w.cancelCalls = 0, 0, 0
+	w.permSetCalls, w.clearQueueCalls, w.popQueueCalls, w.cancelCalls = 0, 0, 0, 0
 	w.modelCalls, w.lspStateCalls, w.lspDiagCalls = 0, 0, 0
 }
 
@@ -180,9 +209,16 @@ func runCmds(m *UI, cmd tea.Cmd) {
 		for _, c := range msg {
 			runCmds(m, c)
 		}
-	case busyStateMsg, promptQueueMsg, agentRunSubmittedMsg, lspStatesMsg, agentModelChangedMsg:
+	case busyStateMsg, promptQueueMsg, queuedMessagePoppedMsg, promptQueueClearedMsg,
+		agentRunSubmittedMsg, lspStatesMsg, agentModelChangedMsg:
 		_, next := m.Update(msg)
 		runCmds(m, next)
+	case util.InfoMsg:
+		// Status banners go through Update exactly as they do in production
+		// (ui.go's util.InfoMsg case). The one command it returns is the
+		// status-clear tick, which blocks for the whole status TTL before
+		// emitting util.ClearStatusMsg, so it is deliberately not run here.
+		m.Update(msg)
 	}
 }
 
@@ -414,10 +450,13 @@ func TestSendMessageSetsOptimisticBusy(t *testing.T) {
 	require.Equal(t, 1, ws.cancelCalls, "second esc press must cancel the agent")
 }
 
-// TestCancelAgentClearsQueueFromCachedCount: the queue-clear decision must
-// come from the memoized count — no synchronous AgentQueuedPrompts probe —
-// and clearing must zero the cached count immediately.
-func TestCancelAgentClearsQueueFromCachedCount(t *testing.T) {
+// TestCancelAgentPreservesQueue verifies that queued prompts do not change
+// Escape's double-press active-task cancellation behavior, and that the UI
+// neither discards its cached queue nor asks the workspace to clear the
+// agent queue. The agent side of the contract — Cancel leaving the queue
+// intact — is pinned by agent.TestCancel_PreservesQueuedPrompts; the stub
+// here only models it.
+func TestCancelAgentPreservesQueue(t *testing.T) {
 	pinTTLs(t)
 
 	ws := &countingWorkspace{ready: true, queued: []string{"a"}}
@@ -428,13 +467,62 @@ func TestCancelAgentClearsQueueFromCachedCount(t *testing.T) {
 	ws.resetCounters()
 
 	cmd := m.cancelAgent()
-	require.Nil(t, cmd)
-	require.Equal(t, 1, ws.clearQueueCalls, "esc with a queue must clear it")
-	require.Zero(t, ws.queuedCalls, "the decision must use the cached count, not a probe")
-	require.Zero(t, ws.queueListCalls, "the decision must use the cached count, not a probe")
-	require.Zero(t, m.promptQueue, "the cached count must be zeroed immediately")
-	require.Empty(t, m.promptQueueItems)
-	require.False(t, m.isCanceling, "clearing the queue must not arm cancellation")
+	require.NotNil(t, cmd, "first esc press must arm the cancellation timer")
+	require.True(t, m.isCanceling)
+	require.Equal(t, []string{"a"}, ws.queued)
+	require.Equal(t, 1, m.promptQueue)
+	require.Equal(t, []string{"a"}, m.promptQueueItems)
+	require.Zero(t, ws.clearQueueCalls, "esc must not clear queued prompts")
+	require.Zero(t, ws.queuedCalls, "esc must not probe the queue")
+	require.Zero(t, ws.queueListCalls, "esc must not probe the queue")
+
+	m.cancelAgent()
+	require.False(t, m.isCanceling)
+	require.Equal(t, 1, ws.cancelCalls, "second esc press must cancel the agent")
+	require.Equal(t, []string{"a"}, ws.queued)
+	require.Zero(t, ws.clearQueueCalls, "canceling the agent must preserve queued prompts")
+}
+
+// cancelHelp returns the description the help panes show for the esc/cancel
+// binding, or "" when no cancel binding is offered.
+func cancelHelp(t *testing.T, binds []key.Binding) string {
+	t.Helper()
+	for _, b := range binds {
+		if b.Help().Key == "esc" {
+			return b.Help().Desc
+		}
+	}
+	return ""
+}
+
+// TestCancelHelpNeverAdvertisesClearQueue pins the help text against the
+// turn-scoped cancel semantics: esc cancels the active turn and leaves the
+// queue alone, so neither help pane may claim it clears the queue just
+// because prompts are queued. The armed state still shows the
+// double-press hint.
+func TestCancelHelpNeverAdvertisesClearQueue(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, agentBusy: true, queued: []string{"a", "b"}}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 2
+	m.promptQueueItems = []string{"a", "b"}
+
+	require.Equal(t, "cancel", cancelHelp(t, m.ShortHelp()),
+		"short help must not advertise clearing the queue")
+	full := m.FullHelp()
+	require.NotEmpty(t, full)
+	require.Equal(t, "cancel", cancelHelp(t, full[0]),
+		"full help must not advertise clearing the queue")
+
+	// First esc press arms cancellation: both panes switch to the
+	// double-press hint, still never mentioning the queue.
+	m.isCanceling = true
+	require.Equal(t, "press again to cancel", cancelHelp(t, m.ShortHelp()))
+	full = m.FullHelp()
+	require.NotEmpty(t, full)
+	require.Equal(t, "press again to cancel", cancelHelp(t, full[0]))
 }
 
 // TestBackstopRefreshesStaleCaches: when the memoized state outlives its TTL
@@ -777,4 +865,526 @@ func TestRemoteYoloToggleUpdatesEditorPrompt(t *testing.T) {
 	require.False(t, m.yoloModeCached())
 	require.Equal(t, normalPrompt, ansi.Strip(m.textarea.View()),
 		"toggling yolo off must restore the normal editor prompt")
+}
+
+func TestPopQueuedMessageKeysRestoreNewestMessage(t *testing.T) {
+	pinTTLs(t)
+
+	for _, tc := range []struct {
+		name string
+		mod  tea.KeyMod
+	}{
+		{name: "shift up", mod: tea.ModShift},
+		{name: "alt up", mod: tea.ModAlt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attachment := message.Attachment{FileName: "notes.txt", MimeType: "text/plain"}
+			ws := &countingWorkspace{
+				ready:  true,
+				queued: []string{"older", "newest"},
+				queuedMessages: []agent.QueuedMessage{
+					{Prompt: "older"},
+					{Prompt: "newest", Attachments: []message.Attachment{attachment}},
+				},
+			}
+			m := newBusyUI(ws)
+			warmCaches(m, true)
+			m.promptQueue = 2
+			m.promptQueueItems = []string{"older", "newest"}
+
+			_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tc.mod})
+			require.Zero(t, ws.popQueueCalls, "pop must run asynchronously")
+			runCmds(m, cmd)
+
+			require.Equal(t, 1, ws.popQueueCalls)
+			require.Equal(t, "newest", m.textarea.Value())
+			require.True(t, m.isAtEditorEnd())
+			require.Equal(t, []message.Attachment{attachment}, m.attachments.List())
+			require.Equal(t, -1, m.promptHistory.index)
+			require.Equal(t, "newest", m.promptHistory.draft)
+			require.Equal(t, []string{"older"}, m.promptQueueItems)
+			require.Equal(t, 1, m.promptQueue)
+			require.Equal(t, []string{"older"}, ws.queued)
+		})
+	}
+}
+
+func TestPopQueuedMessageRejectsNonEmptyInput(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{
+		ready:          true,
+		queued:         []string{"queued"},
+		queuedMessages: []agent.QueuedMessage{{Prompt: "queued"}},
+	}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 1
+	m.promptQueueItems = []string{"queued"}
+	m.textarea.SetValue("draft")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	runCmds(m, cmd)
+
+	require.Zero(t, ws.popQueueCalls)
+	require.Equal(t, "draft", m.textarea.Value())
+	require.Equal(t, util.InfoTypeWarn, m.status.msg.Type)
+	require.Equal(t, "Can't pop queued message: input field is not empty.", m.status.msg.Msg)
+}
+
+// TestPopQueuedMessageKeepsTextTypedWhileInFlight pins the non-destructive
+// apply path. The "input field is not empty" guard runs at key-press time,
+// but the pop is an HTTP round-trip in client/server mode and the message is
+// already gone from the agent queue by the time the result lands — so
+// neither the draft nor the popped prompt may be dropped.
+func TestPopQueuedMessageKeepsTextTypedWhileInFlight(t *testing.T) {
+	pinTTLs(t)
+
+	for _, tc := range []struct {
+		name     string
+		bangMode bool
+		draft    string
+		want     string
+	}{
+		{name: "plain draft", draft: "typed while waiting", want: "typed while waiting\nqueued prompt"},
+		// In bang mode the leading "!" is stripped from the value, so
+		// re-syncing bang mode from the merged text would silently turn a
+		// shell command back into a prompt.
+		{name: "bang draft", bangMode: true, draft: "ls -la", want: "ls -la\nqueued prompt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := &countingWorkspace{
+				ready:          true,
+				queued:         []string{"queued prompt"},
+				queuedMessages: []agent.QueuedMessage{{Prompt: "queued prompt"}},
+			}
+			m := newBusyUI(ws)
+			warmCaches(m, true)
+			m.promptQueue = 1
+			m.promptQueueItems = []string{"queued prompt"}
+			m.bangMode = tc.bangMode
+
+			_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+			// The user starts typing before the pop result arrives.
+			m.textarea.SetValue(tc.draft)
+			runCmds(m, cmd)
+
+			require.Equal(t, 1, ws.popQueueCalls)
+			require.Equal(t, tc.want, m.textarea.Value())
+			require.True(t, m.isAtEditorEnd())
+			require.Equal(t, tc.bangMode, m.bangMode)
+			require.Equal(t, -1, m.promptHistory.index)
+			require.Equal(t, tc.want, m.promptHistory.draft)
+			require.Equal(t, util.InfoTypeWarn, m.status.msg.Type)
+			require.Equal(t,
+				"Input field was not empty: appended the popped queued message below your text.",
+				m.status.msg.Msg)
+			require.Empty(t, m.promptQueueItems)
+			require.Empty(t, ws.queued)
+		})
+	}
+}
+
+func TestPopQueuedMessageAppendsAttachmentsAndSynchronizesBangMode(t *testing.T) {
+	pinTTLs(t)
+
+	existing := message.Attachment{FileName: "existing.txt", MimeType: "text/plain"}
+	restored := message.Attachment{FileName: "restored.png", MimeType: "image/png"}
+	ws := &countingWorkspace{
+		ready:          true,
+		queued:         []string{"!echo queued"},
+		queuedMessages: []agent.QueuedMessage{{Prompt: "!echo queued", Attachments: []message.Attachment{restored}}},
+	}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 1
+	m.promptQueueItems = []string{"!echo queued"}
+	m.attachments.Update(existing)
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
+	runCmds(m, cmd)
+
+	require.True(t, m.bangMode)
+	require.Equal(t, "echo queued", m.textarea.Value())
+	require.True(t, m.isAtEditorEnd())
+	require.Equal(t, []message.Attachment{existing, restored}, m.attachments.List())
+}
+
+// TestPopQueuedMessageEmptyQueueIsAnsweredFromCache pins that a pop with
+// nothing queued costs no workspace round-trip (it is an HTTP POST in
+// client/server mode, and the memoized count already answers it) and still
+// tells the user why the editor stayed empty, so the chord does not read as
+// a broken binding.
+func TestPopQueuedMessageEmptyQueueIsAnsweredFromCache(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 0
+	m.promptQueueItems = nil
+	gen := m.promptQueueGen
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	runCmds(m, cmd)
+
+	require.Zero(t, ws.popQueueCalls, "the memoized count must answer this without a round-trip")
+	require.Equal(t, util.InfoTypeInfo, m.status.msg.Type)
+	require.Equal(t, "No queued messages.", m.status.msg.Msg)
+	require.Empty(t, m.textarea.Value())
+	require.Empty(t, m.attachments.List())
+	require.Equal(t, gen, m.promptQueueGen)
+	require.False(t, m.queuedPopInFlight, "a short-circuited pop must not mark itself in flight")
+}
+
+// TestPopQueuedMessageStaleCountReportsEmptyQueue pins the other half: the
+// memoized count is the gate, so it can be one round-trip stale (the agent
+// dequeued the last prompt meanwhile). The server's "not found" stays the
+// authority — it must report the empty queue and supersede the wrong count
+// rather than leave the pill promising a message that is gone.
+func TestPopQueuedMessageStaleCountReportsEmptyQueue(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 1
+	m.promptQueueItems = []string{"already dequeued"}
+	staleGen := m.promptQueueGen
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	runCmds(m, cmd)
+
+	require.Equal(t, 1, ws.popQueueCalls)
+	require.Equal(t, util.InfoTypeInfo, m.status.msg.Type)
+	require.Equal(t, "No queued messages.", m.status.msg.Msg)
+	require.Empty(t, m.textarea.Value())
+	require.Greater(t, m.promptQueueGen, staleGen,
+		"a queue the server says is empty must supersede the memoized one")
+	require.Zero(t, m.promptQueue, "the re-fetch must drop the phantom queue pill")
+	require.Empty(t, m.promptQueueItems)
+	require.False(t, m.queuedPopInFlight, "an empty-queue result must clear the in-flight mark")
+}
+
+// TestPopQueuedMessageEmptyResultAfterSessionSwitchKeepsCurrentQueue: a pop
+// that found nothing says nothing about the session the user switched to, so
+// it must not invalidate or empty that session's queue.
+func TestPopQueuedMessageEmptyResultAfterSessionSwitchKeepsCurrentQueue(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, queued: []string{"a"}}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 1
+	m.promptQueueItems = []string{"a"}
+	gen := m.promptQueueGen
+
+	require.Nil(t, m.applyQueuedMessagePop(queuedMessagePoppedMsg{forSession: "s0"}))
+	require.Equal(t, []string{"a"}, m.promptQueueItems)
+	require.Equal(t, 1, m.promptQueue)
+	require.Equal(t, gen, m.promptQueueGen)
+	require.Zero(t, ws.queueListCalls, "another session's empty pop must not re-fetch this queue")
+}
+
+// helpDesc returns the description the help panes show for the binding
+// rendered under helpKey, or "" when no such binding is offered.
+func helpDesc(groups [][]key.Binding, helpKey string) string {
+	for _, group := range groups {
+		for _, b := range group {
+			if b.Help().Key == helpKey {
+				return b.Help().Desc
+			}
+		}
+	}
+	return ""
+}
+
+// TestPopQueuedMessageHelpListsBindingWhenQueued pins the discoverability of
+// the pop binding: an unlisted chord is the feature's only entry point, so
+// the full help pane must name it whenever prompts are queued in editor
+// focus — including while a draft is in the editor, which is exactly when a
+// user wonders how to get back to a queued prompt. It must stay out of chat
+// focus, where the same chord scrolls the conversation, and out of the
+// status line, which is already 113 columns wide: another entry there would
+// push "ctrl+g more" (the way to reach the full pane) off a 120- or
+// 140-column terminal.
+func TestPopQueuedMessageHelpListsBindingWhenQueued(t *testing.T) {
+	pinTTLs(t)
+
+	const desc = "edit last queued message"
+
+	ws := &countingWorkspace{ready: true, queued: []string{"older", "newest"}}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 2
+	m.promptQueueItems = []string{"older", "newest"}
+
+	require.Equal(t, desc, helpDesc(m.FullHelp(), "shift+↑"),
+		"full help must list the pop binding while prompts are queued")
+	require.Empty(t, helpDesc([][]key.Binding{m.ShortHelp()}, "shift+↑"),
+		"the status line must stay short enough to keep its own tail")
+
+	m.textarea.SetValue("draft")
+	require.Equal(t, desc, helpDesc(m.FullHelp(), "shift+↑"),
+		"a draft must not hide the binding: it is how the user recovers one")
+	m.textarea.SetValue("")
+
+	// Chat focus: the editor never sees the key press there.
+	m.focus = uiFocusMain
+	require.NotEqual(t, desc, helpDesc(m.FullHelp(), "shift+↑"),
+		"full help must not list the editor pop in chat focus")
+	m.focus = uiFocusEditor
+
+	// Nothing queued: nothing to pop.
+	m.promptQueue = 0
+	m.promptQueueItems = nil
+	require.Empty(t, helpDesc(m.FullHelp(), "shift+↑"),
+		"full help must not list the pop with an empty queue")
+}
+
+// TestPopQueuedMessageIsSingleFlight pins the guard against key autorepeat:
+// the pop is destructive at the agent layer and nothing in the model changes
+// until its result lands, so a second dispatch would remove a second message
+// that the apply path then overwrites in the editor — losing it for good.
+func TestPopQueuedMessageIsSingleFlight(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{
+		ready:          true,
+		queued:         []string{"older", "newest"},
+		queuedMessages: []agent.QueuedMessage{{Prompt: "older"}, {Prompt: "newest"}},
+	}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 2
+	m.promptQueueItems = []string{"older", "newest"}
+
+	_, first := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	require.True(t, m.queuedPopInFlight, "the dispatched pop must be marked in flight")
+	_, second := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	runCmds(m, first)
+	runCmds(m, second)
+
+	require.Equal(t, 1, ws.popQueueCalls, "autorepeat must not pop twice")
+	require.False(t, m.queuedPopInFlight, "the result must clear the in-flight mark")
+	require.Equal(t, "newest", m.textarea.Value())
+	require.Equal(t, []string{"older"}, m.promptQueueItems)
+	require.Equal(t, 1, m.promptQueue)
+	require.Equal(t, []string{"older"}, ws.queued)
+
+	// A later press is allowed once the first pop settled.
+	m.textarea.SetValue("")
+	_, third := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	runCmds(m, third)
+
+	require.Equal(t, 2, ws.popQueueCalls)
+	require.Equal(t, "older", m.textarea.Value())
+	require.Empty(t, ws.queued)
+}
+
+// TestPopQueuedMessageReportsWorkspaceError pins the transport-failure path:
+// the error may be raised after the server already removed the message
+// (response read/decode failure, dropped connection), so the queue state is
+// unknown from here — it must be re-fetched, and the banner must not imply
+// the message is still queued.
+func TestPopQueuedMessageReportsWorkspaceError(t *testing.T) {
+	pinTTLs(t)
+
+	// The server popped "newest" and then the response was lost.
+	ws := &countingWorkspace{ready: true, popErr: errors.New("pop failed"), queued: []string{"older"}}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 2
+	m.promptQueueItems = []string{"older", "newest"}
+	staleGen := m.promptQueueGen
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
+	runCmds(m, cmd)
+
+	require.Equal(t, 1, ws.popQueueCalls)
+	require.Equal(t, util.InfoTypeError, m.status.msg.Type)
+	require.Equal(t, "pop failed (it may have left the queue anyway)", m.status.msg.Msg)
+	require.False(t, m.queuedPopInFlight,
+		"a failed pop must clear the in-flight mark so the key is not wedged")
+	require.Greater(t, m.promptQueueGen, staleGen,
+		"an unknown queue state must supersede the memoized one")
+	require.Equal(t, []string{"older"}, m.promptQueueItems,
+		"the re-fetch must replace the queue the pop may have shortened")
+	require.Equal(t, 1, m.promptQueue)
+}
+
+// TestPopQueuedMessageParksResultAfterSessionSwitch pins the session-switch
+// race: the pop is destructive at the agent layer and queued prompts live
+// nowhere else (they are not persisted until they run), so a result that
+// lands after a session switch may not be dropped. It also may not be
+// restored into the current session's editor — the prompt was written for
+// another session. It is parked and handed back on return.
+func TestPopQueuedMessageParksResultAfterSessionSwitch(t *testing.T) {
+	pinTTLs(t)
+
+	restored := message.Attachment{FileName: "restored.png", MimeType: "image/png"}
+	ws := &countingWorkspace{
+		ready:  true,
+		queued: []string{"older", "newest"},
+		queuedMessages: []agent.QueuedMessage{
+			{Prompt: "older"},
+			{Prompt: "newest", Attachments: []message.Attachment{restored}},
+		},
+	}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 2
+	m.promptQueueItems = []string{"older", "newest"}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	// The user switches sessions while the pop is in flight.
+	m.session = &session.Session{ID: "s2"}
+	runCmds(m, cmd)
+
+	require.Equal(t, 1, ws.popQueueCalls)
+	require.Empty(t, m.textarea.Value(),
+		"another session's prompt must not land in the current editor")
+	require.Empty(t, m.attachments.List())
+	require.Equal(t, util.InfoTypeWarn, m.status.msg.Type)
+	require.Equal(t,
+		"Session changed: the popped message will be restored when you return to that session.",
+		m.status.msg.Msg)
+	require.Equal(t,
+		agent.QueuedMessage{Prompt: "newest", Attachments: []message.Attachment{restored}},
+		m.queuedPopOrphans["s1"],
+		"the popped message must be parked for the session it came from")
+
+	_, cmd = m.Update(loadSessionMsg{session: &session.Session{ID: "s1"}})
+	runCmds(m, cmd)
+
+	require.Equal(t, "newest", m.textarea.Value(), "returning must hand the message back")
+	require.True(t, m.isAtEditorEnd())
+	require.Equal(t, []message.Attachment{restored}, m.attachments.List())
+	require.Equal(t, util.InfoTypeWarn, m.status.msg.Type)
+	require.Equal(t,
+		"Restored the queued message you popped before switching sessions.",
+		m.status.msg.Msg)
+	require.Empty(t, m.queuedPopOrphans, "a restored message must not be parked twice")
+}
+
+// TestParkedPopRestoreKeepsEditorDraft pins that the parked restore is
+// non-destructive: the editor is shared across sessions, so text typed while
+// the message was parked must survive it coming back.
+func TestParkedPopRestoreKeepsEditorDraft(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.session = &session.Session{ID: "s2"}
+	m.queuedPopOrphans = map[string]agent.QueuedMessage{"s1": {Prompt: "newest"}}
+	m.textarea.SetValue("draft")
+
+	_, cmd := m.Update(loadSessionMsg{session: &session.Session{ID: "s1"}})
+	runCmds(m, cmd)
+
+	require.Equal(t, "draft\nnewest", m.textarea.Value())
+	require.True(t, m.isAtEditorEnd())
+	require.Equal(t, util.InfoTypeWarn, m.status.msg.Type)
+	require.Equal(t,
+		"Appended the queued message you popped before switching sessions below your text.",
+		m.status.msg.Msg)
+	require.Empty(t, m.queuedPopOrphans)
+}
+
+func TestPopQueuedMessageSupersedesInFlightQueueRefresh(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{
+		ready:          true,
+		queued:         []string{"older", "newest"},
+		queuedMessages: []agent.QueuedMessage{{Prompt: "older"}, {Prompt: "newest"}},
+	}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 2
+	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueueInFlight = true
+	staleGen := m.promptQueueGen
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	runCmds(m, cmd)
+
+	require.Equal(t, []string{"older"}, m.promptQueueItems)
+	require.Greater(t, m.promptQueueGen, staleGen)
+	cmds := m.applyPromptQueue(promptQueueMsg{
+		forSession: "s1",
+		gen:        staleGen,
+		prompts:    []string{"older", "newest"},
+	})
+	require.Equal(t, []string{"older"}, m.promptQueueItems)
+	require.NotEmpty(t, cmds)
+}
+
+// actionDialog is a dialog stub that answers every message with a fixed
+// action, standing in for the commands dialog so a command action can be
+// driven through the real overlay routing (Overlay.Update -> handleDialogMsg)
+// without building the command list.
+type actionDialog struct {
+	id     string
+	action dialog.Action
+}
+
+func (d *actionDialog) ID() string                      { return d.id }
+func (d *actionDialog) HandleMsg(tea.Msg) dialog.Action { return d.action }
+
+func (d *actionDialog) Draw(uv.Screen, uv.Rectangle) *tea.Cursor { return nil }
+
+// TestClearQueueCommandDiscardsQueue pins the bulk escape hatch: escape is
+// turn-scoped now and preserves the queue, and shift+up pops one message at a
+// time, so the commands-dialog entry is the only way to discard a queue built
+// up by accident. The clear is a synchronous HTTP round-trip in client/server
+// mode, so Update must dispatch it rather than call it.
+func TestClearQueueCommandDiscardsQueue(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, queued: []string{"a", "b"}}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 2
+	m.promptQueueItems = []string{"a", "b"}
+	staleGen := m.promptQueueGen
+	m.dialog.OpenDialog(&actionDialog{id: dialog.CommandsID, action: dialog.ActionClearQueue{}})
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.Zero(t, ws.clearQueueCalls, "the clear must run off the Update goroutine")
+	require.False(t, m.dialog.ContainsDialog(dialog.CommandsID),
+		"selecting the command must close the dialog")
+
+	runCmds(m, cmd)
+
+	require.Equal(t, 1, ws.clearQueueCalls)
+	require.Empty(t, ws.queued, "the agent queue must be discarded")
+	require.Empty(t, m.promptQueueItems)
+	require.Zero(t, m.promptQueue)
+	require.Greater(t, m.promptQueueGen, staleGen,
+		"the clear must supersede queue reads started before it")
+	require.Equal(t, 1, ws.queueListCalls,
+		"the emptied queue must be confirmed by one authoritative re-fetch")
+	require.Equal(t, util.InfoTypeInfo, m.status.msg.Type)
+	require.Equal(t, "Queued messages cleared.", m.status.msg.Msg)
+}
+
+// TestClearQueueResultAfterSessionSwitchKeepsCurrentQueue: the clear is
+// dispatched for one session and its result lands one round-trip later, by
+// which time the user may have switched — it says nothing about the queue now
+// on screen, so it must not empty it.
+func TestClearQueueResultAfterSessionSwitchKeepsCurrentQueue(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, queued: []string{"a"}}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.promptQueue = 1
+	m.promptQueueItems = []string{"a"}
+
+	require.Nil(t, m.applyPromptQueueCleared(promptQueueClearedMsg{forSession: "s0"}))
+	require.Equal(t, []string{"a"}, m.promptQueueItems,
+		"another session's clear must not empty this session's queue")
+	require.Equal(t, 1, m.promptQueue)
 }

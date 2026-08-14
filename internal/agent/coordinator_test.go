@@ -24,6 +24,8 @@ type mockSessionAgent struct {
 	cancelled                []string
 	compactionFlagsCalls     [][2]bool
 	compactionFlagsCallCount int
+	popped                   QueuedMessage
+	popOK                    bool
 }
 
 func (m *mockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -52,10 +54,26 @@ func (m *mockSessionAgent) IsBusy() bool                                { return
 func (m *mockSessionAgent) QueuedPrompts(sessionID string) int          { return 0 }
 func (m *mockSessionAgent) QueuedPromptsList(sessionID string) []string { return nil }
 func (m *mockSessionAgent) ClearQueue(sessionID string)                 {}
+func (m *mockSessionAgent) PopQueuedMessage(sessionID string) (QueuedMessage, bool) {
+	return m.popped, m.popOK
+}
+
 func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
 	return nil
 }
 func (m *mockSessionAgent) GenerateTitle(context.Context, string, string) {}
+
+func TestCoordinatorPopQueuedMessage(t *testing.T) {
+	t.Parallel()
+
+	want := QueuedMessage{Prompt: "queued"}
+	mock := &mockSessionAgent{popped: want, popOK: true}
+	c := &coordinator{currentAgent: mock}
+
+	got, ok := c.PopQueuedMessage("session")
+	require.True(t, ok)
+	require.Equal(t, want, got)
+}
 
 // newTestCoordinator creates a minimal coordinator for unit testing runSubAgent.
 func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCfg config.ProviderConfig) *coordinator {
