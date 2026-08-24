@@ -114,7 +114,7 @@ function printNextSteps({ check, packageJSONPath, version }) {
     console.log(`  git add npm/package.json scripts/prepare-taoeffect-release.mjs scripts/generate-npm-package.mjs`);
     console.log(`  git commit -m "chore(release): prepare ${tag}"`);
     console.log(`  git tag -a ${tag} -m ${tag}`);
-    console.log("  git push taoeffect taoeffect");
+    console.log("  git push taoeffect mine");
     console.log(`  git push taoeffect ${tag}`);
   }
 }

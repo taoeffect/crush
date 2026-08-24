@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 //   node scripts/bump-version-and-release.mjs
 //
 // This script automates a Tao Effect fork release after your code changes have
-// already been committed on the local `taoeffect` branch. It reads the current
+// already been committed on the local `mine` branch. It reads the current
 // npm package version from npm/package.json and compares it with the newest
 // upstream-style Git tag available locally, such as `v0.71.0`.
 //
@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 //
 // Safety checks:
 //   - The working tree must be clean before the script runs.
-//   - The current branch must be `taoeffect` unless overridden.
+//   - The current branch must be `mine` unless overridden.
 //   - The next tag must not already exist locally.
 //
 // Helpful dry run:
@@ -52,7 +52,7 @@ Options:
 
   --branch <name>
       Local branch that must be checked out and pushed.
-      Defaults to taoeffect.
+      Defaults to mine.
 
   --package-json <path>
       Package JSON file to read. Only allowed with --dry-run.
@@ -73,12 +73,12 @@ Default release flow:
   5. Update npm/package.json via prepare-taoeffect-release.mjs
   6. Commit npm/package.json
   7. Tag the commit as v<next-version>
-  8. Push branch taoeffect and tag v<next-version>`;
+  8. Push branch mine and tag v<next-version>`;
 }
 
 function parseArgs(argv) {
   const args = {
-    branch: "taoeffect",
+    branch: "mine",
     dryRun: false,
     packageJSONPath: defaultPackageJSONPath,
     remote: "taoeffect",
