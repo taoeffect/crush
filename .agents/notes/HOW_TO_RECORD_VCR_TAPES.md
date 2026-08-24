@@ -1,14 +1,14 @@
-# How to record glm-5.1 VCR tapes
+# How to record deepseek-v4 VCR tapes
 
-Use this note when `internal/agent/testdata/TestCoderAgent/glm-5.1/*.yaml`
+Use this note when `internal/agent/testdata/TestCoderAgent/deepseek-v4/*.yaml`
 needs to be regenerated.
 
 ## Important context
 
 - The tests record live requests through Hyper, so `CRUSH_HYPER_API_KEY` must be
   set.
-- Hyper / GLM-5.1 can be finicky. A test that times out once may pass quickly on
-  retry.
+- Hyper / the model under test can be finicky. A test that times out once may
+  pass quickly on retry.
 - Slow recordings we observed were not caused by filesystem sandbox problems:
   `read_a_file` successfully called `glob` and received the `/tmp/crush-test/...`
   tool result, then stalled waiting for the next model response.
@@ -17,7 +17,7 @@ needs to be regenerated.
 - Replay should be fast. After recording, verify with:
 
   ```bash
-  go test ./internal/agent -run '^TestCoderAgent/glm-5\.1$' -count=1 -timeout=5m
+  go test ./internal/agent -run '^TestCoderAgent/deepseek-v4$' -count=1 -timeout=5m
   ```
 
 ## Recommended command
@@ -48,7 +48,7 @@ to run in the background and inspect with the job output tool.
    - 240 seconds
    - 300 seconds maximum
 4. If any test fails at the 5-minute timeout, abort and print the failing tests.
-5. If all tapes record, verify replay for the full `glm-5.1` subtest.
+5. If all tapes record, verify replay for the full `deepseek-v4` subtest.
 
 The script deletes each cassette before running its corresponding subtest, which
 forces VCR `ModeRecordOnce` to record fresh live interactions.
@@ -56,15 +56,15 @@ forces VCR `ModeRecordOnce` to record fresh live interactions.
 ## Manual one-off command
 
 ```bash
-rm -f internal/agent/testdata/TestCoderAgent/glm-5.1/<cassette_name>.yaml
-go test ./internal/agent -run '^TestCoderAgent/glm-5\.1/<subtest_name>$' -count=1 -timeout=10m -v
+rm -f internal/agent/testdata/TestCoderAgent/deepseek-v4/<cassette_name>.yaml
+go test ./internal/agent -run '^TestCoderAgent/deepseek-v4/<subtest_name>$' -count=1 -timeout=10m -v
 ```
 
 Example:
 
 ```bash
-rm -f internal/agent/testdata/TestCoderAgent/glm-5.1/read_a_file.yaml
-go test ./internal/agent -run '^TestCoderAgent/glm-5\.1/read_a_file$' -count=1 -timeout=10m -v
+rm -f internal/agent/testdata/TestCoderAgent/deepseek-v4/read_a_file.yaml
+go test ./internal/agent -run '^TestCoderAgent/deepseek-v4/read_a_file$' -count=1 -timeout=10m -v
 ```
 
 ## Current known subtests

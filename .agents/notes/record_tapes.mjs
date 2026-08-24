@@ -3,9 +3,9 @@ import { readdirSync, rmSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const cassetteDir = "internal/agent/testdata/TestCoderAgent/glm-5.1";
+const cassetteDir = "internal/agent/testdata/TestCoderAgent/deepseek-v4";
 const packagePath = "./internal/agent";
-const modelSubtest = "glm-5.1";
+const modelSubtest = "deepseek-v4";
 
 function discoverTests() {
   const result = spawnSync("git", ["ls-files", `${cassetteDir}/*.yaml`], {
