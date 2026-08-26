@@ -2243,6 +2243,105 @@ const docTemplate = `{
                 }
             }
         },
+        "/workspaces/{id}/permissions/auto-approve": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "permissions"
+                ],
+                "summary": "Auto-approve a session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Permission auto-approve request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.PermissionAutoApproveRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/permissions/auto-approve/{sid}": {
+            "delete": {
+                "tags": [
+                    "permissions"
+                ],
+                "summary": "Revoke a session auto-approval",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Session ID",
+                        "name": "sid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
         "/workspaces/{id}/permissions/grant": {
             "post": {
                 "consumes": [
@@ -3424,6 +3523,10 @@ const docTemplate = `{
                         }
                     ]
                 },
+                "sessionless": {
+                    "description": "Sessionless marks a server that does not maintain an MCP session (it\nnever issues a Mcp-Session-Id). When true, Crush omits the\ntools/prompts/resources list-changed handlers: the go-sdk opens a\nSEP-2575 \"subscriptions/listen\" stream whenever any of those handlers\nis set, and sessionless streamable-HTTP servers (e.g. GitHub MCP)\nanswer that POST with 404 (\"session not found\"), which the SDK treats\nas fatal. The cost is no live list-changed notifications from this\nserver.\n\nWhen nil, Crush auto-detects a set of known sessionless servers (see\nIsSessionless); set it explicitly to override that detection.",
+                    "type": "boolean"
+                },
                 "timeout": {
                     "type": "integer"
                 },
@@ -4308,6 +4411,14 @@ const docTemplate = `{
                 "PermissionAllowForSession",
                 "PermissionDeny"
             ]
+        },
+        "proto.PermissionAutoApproveRequest": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string"
+                }
+            }
         },
         "proto.PermissionGrant": {
             "type": "object",
