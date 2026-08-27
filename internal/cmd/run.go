@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -109,7 +110,7 @@ crush run --continue "Follow up on your last response"
 			}
 
 			clientWs := workspace.NewClientWorkspace(c, *ws)
-			if err := clientWs.InitCoderAgentNonInteractive(ctx); err != nil {
+			if err := clientWs.InitCoderAgent(ctx); err != nil {
 				return fmt.Errorf("failed to initialize agent: %w", err)
 			}
 
@@ -184,9 +185,14 @@ func runNonInteractive(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// The models this run asks for. They travel with the prompt rather
+	// than through workspace config, so they apply to this run only.
+	var largeSel, smallSel *config.SelectedModel
 	if largeModel != "" || smallModel != "" {
-		if err := overrideModels(ctx, c, ws, largeModel, smallModel); err != nil {
-			return fmt.Errorf("failed to override models: %w", err)
+		var err error
+		largeSel, smallSel, err = resolveModels(ctx, c, ws, largeModel, smallModel)
+		if err != nil {
+			return fmt.Errorf("failed to resolve models: %w", err)
 		}
 	}
 
@@ -200,7 +206,11 @@ func runNonInteractive(
 	progress = ws.Config.Options.Progress == nil || *ws.Config.Options.Progress
 
 	if !hideSpinner && stderrTTY {
-		t := styles.ThemeForProvider(ws.Config.Models[config.SelectedModelTypeLarge].Provider)
+		largeProvider := ws.Config.Models[config.SelectedModelTypeLarge].Provider
+		if largeSel != nil {
+			largeProvider = largeSel.Provider
+		}
+		t := styles.ThemeForProvider(largeProvider)
 
 		spinner = format.NewSpinner(ctx, cancel, anim.Settings{
 			Size:        10,
@@ -242,8 +252,11 @@ func runNonInteractive(
 		// model/provider from the last assistant message in the
 		// session, provided it is still available.
 		if largeModel == "" && smallModel == "" {
-			if err := restoreModelFromSession(ctx, c, ws, sess.ID); err != nil {
+			large, small, err := restoreModelFromSession(ctx, c, ws, sess.ID)
+			if err != nil {
 				slog.Warn("Failed to restore model from session", "error", err)
+			} else {
+				largeSel, smallSel = large, small
 			}
 		}
 	} else {
@@ -265,15 +278,47 @@ func runNonInteractive(
 	// permission prompt: nobody here can answer one. The server holds
 	// the approval for exactly the turn it runs, so an early exit here
 	// neither strands that turn nor leaves the session approved.
+	//
+	// NonInteractive says the same thing about tools: the turn must not
+	// be offered the question tool, and it waits for MCP servers to
+	// finish connecting because it gets one shot at the tool palette.
+	// The workspace's agent may be shared with an attached TUI, so this
+	// travels per message rather than being set on the agent. So do the
+	// models, for the same reason.
 	runID := uuid.New().String()
 	if err := c.SendMessage(ctx, ws.ID, proto.AgentMessage{
-		SessionID:   sess.ID,
-		RunID:       runID,
-		Prompt:      prompt,
-		AutoApprove: true,
+		SessionID:      sess.ID,
+		RunID:          runID,
+		Prompt:         prompt,
+		AutoApprove:    true,
+		NonInteractive: true,
+		LargeModel:     largeSel,
+		SmallModel:     smallSel,
 	}); err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
+
+	// The server keeps a run going after the request that started it
+	// returns, so an exit from here that is not a finished run has to
+	// say so, or the turn keeps working with nobody left to read it.
+	// Retiring the client on the way out covers the same ground, but not
+	// while the workspace was pre-existing and other clients keep it
+	// alive, and not the ordering between the two. This is the direct
+	// signal.
+	//
+	// The context is fresh and bounded because the usual reason to get
+	// here is Ctrl-C, which has already cancelled ctx.
+	runFinished := false
+	defer func() {
+		if runFinished {
+			return
+		}
+		cancelCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stop()
+		if err := c.CancelAgentRun(cancelCtx, ws.ID, runID); err != nil {
+			slog.Warn("Failed to cancel the agent run while exiting", "run_id", runID, "error", err)
+		}
+	}()
 
 	stream := &runStream{
 		sessionID: sess.ID,
@@ -321,6 +366,7 @@ func runNonInteractive(
 				return err
 			}
 			if done {
+				runFinished = true
 				return nil
 			}
 
@@ -330,6 +376,12 @@ func runNonInteractive(
 		}
 	}
 }
+
+// errRunCancelled reports a run the server ended before it finished.
+// The server bounds a run's life (maximum duration, and the claim of
+// the client that asked for it), so a cancelled terminal event is a
+// failed `crush run`, not a quiet success.
+var errRunCancelled = errors.New("agent run cancelled")
 
 // runStream tracks the per-message stdout cursor and the
 // reconciliation state used by [runNonInteractive] to translate
@@ -355,11 +407,11 @@ type runStream struct {
 }
 
 // handle processes one SSE event. Returns done=true when the run
-// loop should exit (RunComplete observed); returns an error only
-// when the agent run failed (not on context cancel — that path is
-// handled by the caller's select). stopSpinner is called on the
-// first observable assistant output and on completion; passing nil
-// is safe for tests.
+// loop should exit (RunComplete observed); returns an error when the
+// agent run failed or was cancelled by the server (not on context
+// cancel — that path is handled by the caller's select). stopSpinner is
+// called on the first observable assistant output and on completion;
+// passing nil is safe for tests.
 func (s *runStream) handle(ev any, stopSpinner func()) (done bool, err error) {
 	stop := func() {
 		if stopSpinner != nil {
@@ -418,7 +470,21 @@ func (s *runStream) handle(ev any, stopSpinner func()) (done bool, err error) {
 			return false, nil
 		}
 		stop()
-		if e.Payload.Error != "" && !e.Payload.Cancelled {
+		// A cancelled run did not do what was asked, so it must not
+		// look like success. The server can end a run on its own now —
+		// the maximum run duration, or the claim of the client that
+		// asked for it going away — and reporting exit 0 for a turn
+		// stopped partway would hide it. Ctrl-C does not come through
+		// here: it cancels the context and the event loop returns
+		// ctx.Err().
+		//
+		// The event's Error on a cancelled run is only the context
+		// error, so it is dropped; why the server ended the run is in
+		// the server log.
+		if e.Payload.Cancelled {
+			return true, errRunCancelled
+		}
+		if e.Payload.Error != "" {
 			return true, fmt.Errorf("agent run failed: %s", e.Payload.Error)
 		}
 		// Reconcile stdout against the authoritative final
@@ -509,17 +575,23 @@ func waitForAgent(ctx context.Context, c *client.Client, wsID string) error {
 	}
 }
 
-// overrideModels resolves model strings and updates the workspace
-// configuration via the server.
-func overrideModels(
+// resolveModels resolves the -m/--small-model strings against the
+// workspace's providers and returns the pair to run on. It deliberately
+// writes nothing: the models are sent with the prompt (see
+// proto.AgentMessage.LargeModel) so they apply to this run only. Writing
+// them to workspace config would change the model of every other client
+// and session in the directory, and would outlive the command.
+//
+// A nil return for either slot means "keep the workspace's model".
+func resolveModels(
 	ctx context.Context,
 	c *client.Client,
 	ws *proto.Workspace,
 	largeModel, smallModel string,
-) error {
+) (large, small *config.SelectedModel, err error) {
 	cfg, err := c.GetConfig(ctx, ws.ID)
 	if err != nil {
-		return fmt.Errorf("failed to get config: %w", err)
+		return nil, nil, fmt.Errorf("failed to get config: %w", err)
 	}
 
 	providers := cfg.Providers.Copy()
@@ -531,15 +603,13 @@ func overrideModels(
 	if largeModel != "" {
 		found, err := validateModelMatches(largeMatches, largeModel, "large")
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		largeProviderID = found.provider
 		slog.Info("Overriding large model", "provider", found.provider, "model", found.modelID)
-		if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeLarge, config.SelectedModel{
+		large = &config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
-		}); err != nil {
-			return fmt.Errorf("failed to set large model: %w", err)
 		}
 	}
 
@@ -547,39 +617,43 @@ func overrideModels(
 	case smallModel != "":
 		found, err := validateModelMatches(smallMatches, smallModel, "small")
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		slog.Info("Overriding small model", "provider", found.provider, "model", found.modelID)
-		if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, config.SelectedModel{
+		small = &config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
-		}); err != nil {
-			return fmt.Errorf("failed to set small model: %w", err)
 		}
 
 	case largeModel != "":
+		// Keep the small model on the same provider as the large one:
+		// a `-m` that crossed providers used to leave title generation
+		// and summarizing on the old provider.
 		sm, err := c.GetDefaultSmallModel(ctx, ws.ID, largeProviderID)
 		if err != nil {
 			slog.Warn("Failed to get default small model", "error", err)
 		} else if sm != nil {
-			if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, *sm); err != nil {
-				return fmt.Errorf("failed to set small model: %w", err)
-			}
+			small = sm
 		}
 	}
 
-	return c.UpdateAgent(ctx, ws.ID)
+	return large, small, nil
 }
 
 // restoreModelFromSession reads the last assistant message in the
-// session and, if it used a different provider/model than the current
-// config, updates the preferred model on the server provided the
-// provider/model is still available. This ensures that continuing a
-// session uses the same model that produced the last response.
-func restoreModelFromSession(ctx context.Context, c *client.Client, ws *proto.Workspace, sessionID string) error {
+// session and returns the model pair the continued run should use, so
+// `crush run -c` answers on the same model that produced the last
+// response. It returns nils when the session's model matches the
+// workspace's, when the session has no assistant message to learn from,
+// or when that provider/model is no longer available.
+//
+// Like resolveModels this writes nothing: restoring the model of one
+// continued session must not change the workspace's model for everything
+// else using the directory.
+func restoreModelFromSession(ctx context.Context, c *client.Client, ws *proto.Workspace, sessionID string) (large, small *config.SelectedModel, err error) {
 	msgs, err := c.ListMessages(ctx, ws.ID, sessionID)
 	if err != nil {
-		return fmt.Errorf("failed to list messages: %w", err)
+		return nil, nil, fmt.Errorf("failed to list messages: %w", err)
 	}
 
 	var lastAssistant *proto.Message
@@ -590,28 +664,25 @@ func restoreModelFromSession(ctx context.Context, c *client.Client, ws *proto.Wo
 		}
 	}
 	if lastAssistant == nil || lastAssistant.Provider == "" || lastAssistant.Model == "" {
-		return nil
+		return nil, nil, nil
 	}
 
 	cfg := ws.Config
 	currentLarge := cfg.Models[config.SelectedModelTypeLarge]
 	if currentLarge.Provider == lastAssistant.Provider && currentLarge.Model == lastAssistant.Model {
-		return nil
+		return nil, nil, nil
 	}
 
 	if !cfg.IsModelAvailable(lastAssistant.Provider, lastAssistant.Model) {
 		slog.Debug("Skipping model restoration: provider/model not available",
 			"provider", lastAssistant.Provider,
 			"model", lastAssistant.Model)
-		return nil
+		return nil, nil, nil
 	}
 
-	selectedModel := config.SelectedModel{
+	large = &config.SelectedModel{
 		Provider: lastAssistant.Provider,
 		Model:    lastAssistant.Model,
-	}
-	if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeLarge, selectedModel); err != nil {
-		return fmt.Errorf("failed to set large model: %w", err)
 	}
 
 	if _, ok := cfg.Models[config.SelectedModelTypeSmall]; !ok {
@@ -619,13 +690,11 @@ func restoreModelFromSession(ctx context.Context, c *client.Client, ws *proto.Wo
 		if err != nil {
 			slog.Warn("Failed to get default small model", "error", err)
 		} else if sm != nil {
-			if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, *sm); err != nil {
-				slog.Warn("Failed to set small model during session restore", "error", err)
-			}
+			small = sm
 		}
 	}
 
-	return c.UpdateAgent(ctx, ws.ID)
+	return large, small, nil
 }
 
 type modelMatch struct {

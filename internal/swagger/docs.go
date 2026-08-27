@@ -447,6 +447,47 @@ const docTemplate = `{
                 }
             }
         },
+        "/workspaces/{id}/agent/runs/{rid}/cancel": {
+            "post": {
+                "tags": [
+                    "agent"
+                ],
+                "summary": "Cancel agent run",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Run ID",
+                        "name": "rid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
         "/workspaces/{id}/agent/sessions/{sid}": {
             "get": {
                 "produces": [
@@ -3884,6 +3925,15 @@ const docTemplate = `{
                 "auto_approve": {
                     "type": "boolean"
                 },
+                "client_id": {
+                    "type": "string"
+                },
+                "large_model": {
+                    "$ref": "#/definitions/config.SelectedModel"
+                },
+                "non_interactive": {
+                    "type": "boolean"
+                },
                 "prompt": {
                     "type": "string"
                 },
@@ -3892,6 +3942,9 @@ const docTemplate = `{
                 },
                 "session_id": {
                     "type": "string"
+                },
+                "small_model": {
+                    "$ref": "#/definitions/config.SelectedModel"
                 }
             }
         },

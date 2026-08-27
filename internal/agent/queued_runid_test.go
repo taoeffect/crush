@@ -15,6 +15,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// textStream yields the one-text-part, clean-finish stream the fake
+// models in this file hand back once they decide to succeed.
+func textStream(text string) fantasy.StreamResponse {
+	return func(yield func(fantasy.StreamPart) bool) {
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "1"}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "1", Delta: text}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: "1"}) {
+			return
+		}
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+	}
+}
+
 // gatedStreamModel streams a single text part followed by a clean finish,
 // but blocks the very first Stream call until its gate is released. That
 // lets a test hold a run "active" (past PrepareStep, inside Stream) just
@@ -49,19 +66,7 @@ func (m *gatedStreamModel) Stream(ctx context.Context, call fantasy.Call) (fanta
 			return nil, ctx.Err()
 		}
 	}
-	text := m.text
-	return func(yield func(fantasy.StreamPart) bool) {
-		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "1"}) {
-			return
-		}
-		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "1", Delta: text}) {
-			return
-		}
-		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: "1"}) {
-			return
-		}
-		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
-	}, nil
+	return textStream(m.text), nil
 }
 
 func (m *gatedStreamModel) GenerateObject(ctx context.Context, call fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
@@ -185,11 +190,15 @@ func TestRun_QueuedRunIDPromptRunsRecursivelyAndPublishesRunComplete(t *testing.
 
 // TestRun_CancelKeepsQueuedPromptsForEditing is the end-to-end proof for
 // issue #3558: with a turn active and prompts queued behind it, "esc esc"
-// must cancel the active turn and nothing else. The canceled turn returns
-// through the error path (before the completion handoff), so the queue is
-// left intact, in order, for the user to pop and edit; still-queued
-// prompts are not reported as cancelled to a waiting caller, because they
-// have not been discarded.
+// must cancel the active turn and leave the prompts the user typed alone.
+// The canceled turn returns through the error path, and the handoff that
+// path owes the queue keeps every interactive prompt, in order, for the
+// user to pop and edit.
+//
+// A queued prompt submitted by a non-interactive caller is the one that
+// does not survive: a client is blocked on its RunID, so the cancel
+// releases it with a terminal cancelled event instead of starting it as a
+// new turn on the session the user just stopped.
 func TestRun_CancelKeepsQueuedPromptsForEditing(t *testing.T) {
 	t.Parallel()
 
@@ -253,13 +262,13 @@ func TestRun_CancelKeepsQueuedPromptsForEditing(t *testing.T) {
 	require.ErrorIs(t, <-mainDone, context.Canceled,
 		"the active turn must end canceled")
 
-	// The newest entry is still poppable for editing.
-	require.Equal(t, []string{"queued-one", "queued-two"}, sa.QueuedPromptsList(sess.ID),
-		"cancelling must not discard queued prompts")
+	// The typed prompt is untouched and still poppable for editing.
+	require.Equal(t, []string{"queued-one"}, sa.QueuedPromptsList(sess.ID),
+		"cancelling must not discard an interactive queued prompt")
 	popped, ok := sa.PopQueuedMessage(sess.ID)
 	require.True(t, ok)
-	require.Equal(t, "queued-two", popped.Prompt)
-	require.Equal(t, []string{"queued-one"}, sa.QueuedPromptsList(sess.ID))
+	require.Equal(t, "queued-one", popped.Prompt)
+	require.Empty(t, sa.QueuedPromptsList(sess.ID))
 
 	// Neither queued prompt ran: only the canceled main turn produced
 	// messages.
@@ -271,10 +280,9 @@ func TestRun_CancelKeepsQueuedPromptsForEditing(t *testing.T) {
 	require.Equal(t, message.Assistant, msgs[1].Role)
 	require.Equal(t, message.FinishReasonCanceled, msgs[1].FinishReason())
 
-	// Exactly two terminal events: the canceled main turn, and the popped
-	// prompt (a pop does discard it, so its waiting caller is released).
-	// A prompt that merely sat in the queue across the cancel publishes
-	// nothing.
+	// Exactly two terminal events: the canceled main turn, and the
+	// dispatched queued prompt the cancel released. The interactive
+	// prompt has no waiting caller, so popping it publishes nothing.
 	got := map[string]notify.RunComplete{}
 	deadline := time.After(5 * time.Second)
 	for len(got) < 2 {
@@ -286,7 +294,8 @@ func TestRun_CancelKeepsQueuedPromptsForEditing(t *testing.T) {
 		}
 	}
 	require.True(t, got["run-main"].Cancelled, "the active turn must report cancelled")
-	require.True(t, got["run-two"].Cancelled, "the popped prompt must release its caller")
+	require.True(t, got["run-two"].Cancelled,
+		"the dispatched queued prompt must release its caller")
 	select {
 	case extra := <-ch:
 		t.Fatalf("unexpected extra terminal event: %+v", extra.Payload)
@@ -572,12 +581,16 @@ func TestRun_SubmissionDuringCompletionHandoffRunsAfterTheQueue(t *testing.T) {
 	}
 }
 
-// errStreamModel fails every Stream call with a fixed error, the way a
-// provider that rejects the request does. PrepareStep has already created
-// the assistant message by then, so the turn takes Run's stream-error
-// branch and publishes an errored terminal event.
+// errStreamModel fails its first Stream call with a fixed error, the way
+// a provider that rejects one request does, and streams text on every
+// call after that so the turns following the failed one succeed.
+// PrepareStep has already created the assistant message by the time
+// Stream is reached, so the failing turn takes Run's stream-error branch
+// and publishes an errored terminal event.
 type errStreamModel struct {
-	err error
+	err   error
+	text  string
+	calls atomic.Int64
 }
 
 func (m *errStreamModel) Provider() string { return "fake" }
@@ -588,7 +601,10 @@ func (m *errStreamModel) Generate(ctx context.Context, call fantasy.Call) (*fant
 }
 
 func (m *errStreamModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-	return nil, m.err
+	if m.calls.Add(1) == 1 {
+		return nil, m.err
+	}
+	return textStream(m.text), nil
 }
 
 func (m *errStreamModel) GenerateObject(ctx context.Context, call fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
@@ -603,10 +619,13 @@ func (m *errStreamModel) StreamObject(ctx context.Context, call fantasy.ObjectCa
 // the attribution contract of the FIFO swap: when a submission to an idle
 // session with a queue is requeued behind the queue head and the head's
 // turn then fails, the failure belongs to the head's RunID alone. The
-// submission's prompt has not run, so it must get no terminal event yet —
-// otherwise its `crush run` waiter would exit on a foreign prompt's error
-// and the prompt would publish a second terminal event for the same RunID
-// when its own turn finally ran.
+// submission's prompt has not run yet, so it must never be reported under
+// the head's outcome — otherwise its `crush run` waiter would exit on a
+// foreign prompt's error.
+//
+// The failed turn still owes the queue a handoff, so the submission then
+// runs as its own turn and publishes its own terminal event. That is what
+// keeps its waiter from hanging on a session the failure left idle.
 func TestRun_SwappedHeadFailureIsNotAttributedToTheRequeuedSubmission(t *testing.T) {
 	t.Parallel()
 
@@ -616,7 +635,7 @@ func TestRun_SwappedHeadFailureIsNotAttributedToTheRequeuedSubmission(t *testing
 
 	streamErr := errors.New("provider rejected the request")
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: &errStreamModel{err: streamErr}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		LargeModel:  Model{Model: &errStreamModel{err: streamErr, text: "done"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 		SmallModel:  Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 		IsYolo:      true,
 		Sessions:    env.sessions,
@@ -645,28 +664,42 @@ func TestRun_SwappedHeadFailureIsNotAttributedToTheRequeuedSubmission(t *testing
 	})
 	require.ErrorIs(t, err, streamErr, "the promoted head's failure propagates to the caller")
 
-	// The caller's own prompt never ran: it is still queued, and the
-	// dispatcher must be told so it does not report the head's failure
-	// under run-b.
-	require.Equal(t, []string{"new"}, sa.QueuedPromptsList(sess.ID),
-		"the requeued submission must still be queued after the head failed")
+	// The caller's own prompt did not run as part of this invocation, and
+	// the dispatcher must be told so it does not report the head's
+	// failure under run-b.
 	ranID, requeued := RequeuedRun(ctx)
 	require.True(t, requeued, "the swap must record that the dispatched prompt was requeued")
 	require.Equal(t, "run-a", ranID, "the invocation's outcome belongs to the promoted head")
 
-	// Exactly one terminal event, errored, for the head's RunID.
-	select {
-	case ev := <-ch:
-		require.Equal(t, "run-a", ev.Payload.RunID,
-			"the failed turn's terminal event must carry the RunID of the prompt that ran")
-		require.Contains(t, ev.Payload.Error, streamErr.Error())
-		require.False(t, ev.Payload.Cancelled)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the promoted head published no terminal RunComplete; its waiter would hang")
+	// Two terminal events: the head's failure under run-a, then the
+	// requeued submission's own successful turn under run-b.
+	first := requireRunComplete(t, ch)
+	require.Equal(t, "run-a", first.RunID,
+		"the failed turn's terminal event must carry the RunID of the prompt that ran")
+	require.Contains(t, first.Error, streamErr.Error())
+	require.False(t, first.Cancelled)
+
+	second := requireRunComplete(t, ch)
+	require.Equal(t, "run-b", second.RunID,
+		"the requeued submission must publish its own terminal event")
+	require.Empty(t, second.Error, "the requeued submission's own turn succeeded")
+	require.False(t, second.Cancelled)
+
+	require.Empty(t, sa.QueuedPromptsList(sess.ID),
+		"the failed turn's handoff must start the requeued submission")
+	msgs, err := env.messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
+	var ranNew bool
+	for _, msg := range msgs {
+		if msg.Role == message.User && msg.Content().String() == "new" {
+			ranNew = true
+		}
 	}
+	require.True(t, ranNew, "the requeued submission must run as its own turn")
+
 	select {
 	case extra := <-ch:
-		t.Fatalf("terminal event for a prompt that has not run: %+v", extra.Payload)
+		t.Fatalf("unexpected extra terminal event: %+v", extra.Payload)
 	case <-time.After(200 * time.Millisecond):
 	}
 }

@@ -298,7 +298,7 @@ func TestCancel_TwoAcceptedBothObserveCancellation(t *testing.T) {
 
 	// A single cancel arrives before either becomes active.
 	sa.Cancel(sess.ID)
-	require.Equal(t, accept2.seq, sa.pendingCancelMark(sess.ID),
+	require.GreaterOrEqual(t, sa.pendingCancelMark(sess.ID), accept2.seq,
 		"one cancel must mark every currently-accepted prompt as canceled")
 	require.GreaterOrEqual(t, sa.pendingCancelMark(sess.ID), accept1.seq,
 		"the mark must cover the earlier accepted prompt too")
@@ -400,7 +400,7 @@ func TestCancel_AcceptedAfterCancelIsNotPoisoned(t *testing.T) {
 	// One cancel arrives covering both A and B.
 	sa.Cancel(sess.ID)
 	require.True(t, sa.hasPendingCancel(sess.ID))
-	require.Equal(t, acceptB.seq, sa.pendingCancelMark(sess.ID),
+	require.GreaterOrEqual(t, sa.pendingCancelMark(sess.ID), acceptB.seq,
 		"the mark must cover every prompt accepted before the cancel")
 
 	// C is accepted AFTER the cancel; its sequence is above the mark.

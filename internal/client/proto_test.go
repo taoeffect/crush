@@ -406,6 +406,126 @@ func TestSendMessageOmitsAutoApproveByDefault(t *testing.T) {
 	require.NotContains(t, string(body), "auto_approve")
 }
 
+// TestSendMessagePostsNonInteractiveFlag pins the other half of the
+// `crush run` request. Interactivity is a property of the run, not of
+// the workspace: the server keeps one coordinator per workspace, so a
+// headless prompt has to say on the wire that nobody can answer a
+// question. A TUI prompt to the same workspace must not say it.
+func TestSendMessagePostsNonInteractiveFlag(t *testing.T) {
+	t.Parallel()
+
+	bodies := make(chan []byte, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		bodies <- body
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	c := captureClient(t, srv)
+	require.NoError(t, c.SendMessage(context.Background(), "ws1", proto.AgentMessage{
+		SessionID:      "sess1",
+		Prompt:         "hello",
+		NonInteractive: true,
+	}))
+	require.NoError(t, c.SendMessage(context.Background(), "ws1", proto.AgentMessage{
+		SessionID: "sess1",
+		Prompt:    "hello",
+	}))
+
+	var headless proto.AgentMessage
+	require.NoError(t, json.Unmarshal(<-bodies, &headless))
+	require.True(t, headless.NonInteractive,
+		"a headless run must tell the server no human can answer a question")
+	require.NotContains(t, string(<-bodies), "non_interactive")
+}
+
+// TestInitiateAgentProcessingPostsWithoutBody pins the init request. The
+// server keeps the coordinator a workspace already has, so init carries
+// nothing: it only makes sure a coordinator exists.
+func TestInitiateAgentProcessingPostsWithoutBody(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		var err error
+		body, err = io.ReadAll(r.Body)
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := captureClient(t, srv)
+	require.NoError(t, c.InitiateAgentProcessing(context.Background(), "ws1"))
+
+	require.Equal(t, "/v1/workspaces/ws1/agent/init", gotPath)
+	require.Empty(t, body)
+}
+
+// TestSendMessageStampsClientID pins run ownership on the wire. The
+// server ends a run when the claim of the client that asked for it goes
+// away, so the prompt has to name that client — and the caller must not
+// be able to get it wrong or claim to be somebody else.
+func TestSendMessageStampsClientID(t *testing.T) {
+	t.Parallel()
+
+	var got proto.AgentMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	c := captureClient(t, srv)
+	require.NoError(t, c.SendMessage(context.Background(), "ws1", proto.AgentMessage{
+		SessionID: "sess1",
+		Prompt:    "hello",
+		ClientID:  "somebody-else",
+	}))
+
+	require.Equal(t, c.ClientID(), got.ClientID)
+	require.NotEmpty(t, got.ClientID)
+}
+
+// TestCancelAgentRunPostsToTheRunRoute pins the path a client uses to
+// end one run it owns, rather than the whole session (which would stop
+// an attached TUI's turn on the same session too).
+func TestCancelAgentRunPostsToTheRunRoute(t *testing.T) {
+	t.Parallel()
+
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := captureClient(t, srv)
+	require.NoError(t, c.CancelAgentRun(context.Background(), "ws1", "run1"))
+
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, "/v1/workspaces/ws1/agent/runs/run1/cancel", gotPath)
+}
+
+// TestCancelAgentRunReportsFailure keeps the exit path honest: a client
+// that could not end its run should say so rather than pretend it did.
+func TestCancelAgentRunReportsFailure(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := captureClient(t, srv)
+	err := c.CancelAgentRun(context.Background(), "ws1", "run1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "status code 404")
+}
+
 func marshalSSEPayload(t *testing.T) []byte {
 	t.Helper()
 

@@ -10,17 +10,21 @@ import (
 )
 
 // TestBuildToolsNewSessionRegistration verifies that buildTools registers the
-// new_session tool for interactive top-level agents in both compaction modes,
-// omits it for non-interactive coordinators and for sub-agents (which cannot
-// perform the TUI handoff), and picks the description variant that matches
-// whether context status injection is active (llm compaction mode only) and
-// whether backend auto-summarization is enabled (always in llm mode; honoring
-// disable_auto_summarize otherwise).
+// new_session tool for every top-level agent, omits it for sub-agents (which
+// cannot perform the TUI handoff), and picks the description variant that
+// matches whether context status injection is active (llm compaction mode
+// only) and whether backend auto-summarization is enabled (always in llm
+// mode; honoring disable_auto_summarize otherwise).
+//
+// Interactivity is deliberately not a factor here. One agent serves an
+// attached TUI and headless `crush run` prompts at the same time, so the
+// tool stays in the palette and sessionAgent.turnTools withholds it from
+// the turns that cannot perform the handoff. That half is pinned by
+// TestRun_NonInteractiveTurnWithholdsInteractiveTools.
 func TestBuildToolsNewSessionRegistration(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name                 string
-		interactive          bool
 		method               config.CompactionMethod
 		isSubAgent           bool
 		disableAutoSummarize bool
@@ -29,45 +33,32 @@ func TestBuildToolsNewSessionRegistration(t *testing.T) {
 		wantAutoSummarizeOff bool
 	}{
 		{
-			name:          "interactive llm mode",
-			interactive:   true,
+			name:          "llm mode",
 			method:        config.CompactionLLM,
 			wantTool:      true,
 			wantCtxStatus: true,
 		},
 		{
-			name:        "interactive auto mode",
-			interactive: true,
-			method:      config.CompactionAuto,
-			wantTool:    true,
+			name:     "auto mode",
+			method:   config.CompactionAuto,
+			wantTool: true,
 		},
 		{
-			name:                 "interactive auto mode auto-summarize disabled",
-			interactive:          true,
+			name:                 "auto mode auto-summarize disabled",
 			method:               config.CompactionAuto,
 			disableAutoSummarize: true,
 			wantTool:             true,
 			wantAutoSummarizeOff: true,
 		},
 		{
-			name:        "interactive llm mode sub-agent",
-			interactive: true,
-			method:      config.CompactionLLM,
-			isSubAgent:  true,
+			name:       "llm mode sub-agent",
+			method:     config.CompactionLLM,
+			isSubAgent: true,
 		},
 		{
-			name:        "interactive auto mode sub-agent",
-			interactive: true,
-			method:      config.CompactionAuto,
-			isSubAgent:  true,
-		},
-		{
-			name:   "non-interactive llm mode",
-			method: config.CompactionLLM,
-		},
-		{
-			name:   "non-interactive auto mode",
-			method: config.CompactionAuto,
+			name:       "auto mode sub-agent",
+			method:     config.CompactionAuto,
+			isSubAgent: true,
 		},
 	}
 
@@ -87,7 +78,6 @@ func TestBuildToolsNewSessionRegistration(t *testing.T) {
 				permissions: env.permissions,
 				history:     env.history,
 				filetracker: *env.filetracker,
-				interactive: tc.interactive,
 			}
 
 			// A minimal agent config; its AllowedTools deliberately excludes

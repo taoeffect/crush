@@ -63,11 +63,13 @@ func TestSessionAgentRun_QueueStripsOnComplete(t *testing.T) {
 // TestDrainQueueForStep_FiltersUnderDispatchLock verifies that the queue
 // drain evaluates the per-session cancel mark while holding the dispatch
 // mutex (canceledBySeq's documented precondition). Calls queued after the
-// cancel (higher seq) are folded into the active turn; calls at or below
+// cancel (higher seq) are folded into the active turn. Calls at or below
 // the cancel high-water mark — and untracked enqueues (seq == 0) whenever
-// any mark is present — stay in the queue in their original order. A
-// cancel ends the turn in progress, so folding a covered prompt into that
-// turn would destroy it; discarding it would lose it outright.
+// any mark is present — are split by owner: one carrying a RunID or a run
+// lifetime is a dispatched run and is dropped so its waiters can finish,
+// while one carrying neither is an interactive follow-up and stays queued
+// in its original order. None of the calls here carry either, so every
+// covered one stays.
 func TestDrainQueueForStep_FiltersUnderDispatchLock(t *testing.T) {
 	t.Parallel()
 
@@ -87,11 +89,13 @@ func TestDrainQueueForStep_FiltersUnderDispatchLock(t *testing.T) {
 	// Cancel high-water mark at seq 2: seq <= 2 and seq == 0 are covered.
 	a.cancelMark.Set(sessionID, 2)
 
-	fold := a.drainQueueForStep(sessionID)
+	fold, dropped := a.drainQueueForStep(sessionID)
 
 	require.Len(t, fold, 1,
 		"only the follow-up queued after the cancel (seq > mark) must be folded")
 	require.Equal(t, "after", fold[0].Prompt)
+	require.Empty(t, dropped,
+		"no covered call here is a dispatched run, so none is dropped")
 
 	kept, ok := a.messageQueue.Get(sessionID)
 	require.True(t, ok, "cancel-covered prompts must survive the drain")
@@ -118,8 +122,9 @@ func TestDrainQueueForStep_NoMarkFoldsAllNonRunID(t *testing.T) {
 		{SessionID: sessionID, Prompt: "b", acceptSeq: 5},
 	})
 
-	fold := a.drainQueueForStep(sessionID)
+	fold, dropped := a.drainQueueForStep(sessionID)
 	require.Len(t, fold, 2, "no cancel mark means all non-RunID queued calls are folded")
+	require.Empty(t, dropped)
 }
 
 // TestDrainQueueForStep_KeepsRunIDPromptsQueued is the core of fix 2: a
@@ -145,10 +150,11 @@ func TestDrainQueueForStep_KeepsRunIDPromptsQueued(t *testing.T) {
 		{SessionID: sessionID, RunID: "run-b", Prompt: "keep-me-too", acceptSeq: 3},
 	})
 
-	fold := a.drainQueueForStep(sessionID)
+	fold, dropped := a.drainQueueForStep(sessionID)
 
 	require.Len(t, fold, 1, "only the non-RunID prompt is folded into the active turn")
 	require.Equal(t, "fold-me", fold[0].Prompt)
+	require.Empty(t, dropped)
 
 	kept, ok := a.messageQueue.Get(sessionID)
 	require.True(t, ok, "RunID-bearing prompts must remain queued for the recursive run path")
@@ -157,12 +163,15 @@ func TestDrainQueueForStep_KeepsRunIDPromptsQueued(t *testing.T) {
 	require.Equal(t, "run-b", kept[1].RunID)
 }
 
-// TestDrainQueueForStep_KeepsCanceledPromptsQueued verifies that a cancel
-// covering a queued prompt never removes it: the drain leaves it queued
-// (RunID or not) so it survives the canceled turn, stays visible in the
-// queue pill, and remains poppable. Only prompts queued after the cancel
-// are folded into the active turn.
-func TestDrainQueueForStep_KeepsCanceledPromptsQueued(t *testing.T) {
+// TestDrainQueueForStep_SplitsCanceledPromptsByOwner verifies the split a
+// cancel makes across the prompts it covers. One carrying a RunID (or a run
+// lifetime) is a dispatched run: a client waits on its terminal cancelled
+// RunComplete and its dispatcher is blocked on its lifetime, so it is
+// dropped from the queue and reported, which is the only way either one
+// finishes. One carrying neither is an interactive follow-up: a cancel is
+// turn-scoped, so it survives, stays visible in the queue pill and remains
+// poppable. Prompts queued after the cancel are not covered at all.
+func TestDrainQueueForStep_SplitsCanceledPromptsByOwner(t *testing.T) {
 	t.Parallel()
 
 	env := testEnv(t)
@@ -179,15 +188,20 @@ func TestDrainQueueForStep_KeepsCanceledPromptsQueued(t *testing.T) {
 	})
 	a.cancelMark.Set(sessionID, 2)
 
-	fold := a.drainQueueForStep(sessionID)
+	fold, dropped := a.drainQueueForStep(sessionID)
 
 	require.Empty(t, fold, "a cancel-covered prompt must not be folded into the canceled turn")
+	require.Len(t, dropped, 1, "only the covered dispatched run is dropped")
+	require.Equal(t, "run-canceled", dropped[0].RunID,
+		"the dropped RunID-bearing prompt needs a terminal RunComplete")
 
 	kept, ok := a.messageQueue.Get(sessionID)
 	require.True(t, ok)
-	require.Len(t, kept, 3, "cancellation must not remove queued prompts")
-	require.Equal(t, []string{"canceled", "canceled-no-runid", "survives"},
-		[]string{kept[0].Prompt, kept[1].Prompt, kept[2].Prompt})
+	require.Len(t, kept, 2,
+		"the covered follow-up and the uncovered dispatched run must both stay")
+	require.Equal(t, []string{"canceled-no-runid", "survives"},
+		[]string{kept[0].Prompt, kept[1].Prompt},
+		"the survivors must keep their original order")
 }
 
 func TestPopQueuedMessage_NewestFirstWithAttachments(t *testing.T) {
@@ -396,6 +410,20 @@ func requireNoRunComplete(t *testing.T, ch <-chan pubsub.Event[notify.RunComplet
 	}
 }
 
+// requireRunComplete takes the next terminal event off ch and returns it,
+// failing the test if none arrives: a caller blocking on that RunID would
+// hang the same way.
+func requireRunComplete(t *testing.T, ch <-chan pubsub.Event[notify.RunComplete]) notify.RunComplete {
+	t.Helper()
+	select {
+	case ev := <-ch:
+		return ev.Payload
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected a RunComplete, got none")
+		return notify.RunComplete{}
+	}
+}
+
 // TestClearQueue_QueuedRunIDPromptPublishesCancelledRunComplete proves the
 // terminal-event behavior end-to-end: a RunID-bearing prompt removed from
 // the queue by the explicit ClearQueue path (which routes through
@@ -590,10 +618,23 @@ func TestClearQueue_HoldsSessionDispatchMutex(t *testing.T) {
 // tail's stale pre-swap snapshot back over that swap — the submission is
 // wiped from the queue (never run, no terminal RunComplete for its RunID)
 // and the head, already active, is re-queued and runs a second time.
+//
+// Summarize also takes that mutex on the way in, to register its active
+// request atomically against a concurrent Cancel, so the test cannot
+// simply hold the lock from the start: it would block the entry instead
+// of the tail. The gated model holds summarize inside its model stream —
+// past the entry section, before the tail — which is where the lock has
+// to be taken for the tail to be what waits on it.
 func TestSummarize_QueuePromotionHoldsSessionDispatchMutex(t *testing.T) {
 	t.Parallel()
 
-	sa, env := newStreamTestAgent(t)
+	env := testEnv(t)
+	large := &gatedStreamModel{
+		text:    "summary",
+		gate:    make(chan struct{}),
+		entered: make(chan struct{}),
+	}
+	sa := testSessionAgent(env, large, &finishStreamModel{text: "title"}, "system").(*sessionAgent)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -608,11 +649,20 @@ func TestSummarize_QueuePromotionHoldsSessionDispatchMutex(t *testing.T) {
 
 	sa.enqueueCall(SessionAgentCall{SessionID: sess.ID, Prompt: "queued"})
 
+	done := make(chan error, 1)
+	go func() {
+		done <- sa.Summarize(context.WithoutCancel(t.Context()), SummarizeCall{SessionID: sess.ID})
+	}()
+
+	select {
+	case <-large.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("summarize never entered its model stream")
+	}
+
 	mu := sa.sessionMu(sess.ID)
 	mu.Lock()
-
-	done := make(chan error, 1)
-	go func() { done <- sa.Summarize(context.WithoutCancel(t.Context()), sess.ID, nil, nil) }()
+	close(large.gate)
 
 	// Persisting the summary on the session is the last step before the
 	// tail, so once it lands the only work left is the promotion.
@@ -774,12 +824,13 @@ func TestCancelAll_ShutdownDiscardsQueueOnIdleSession(t *testing.T) {
 		"shutdown must discard the queue of a session left idle by a cancel")
 }
 
-// TestCancelAll_SummarizeKeyClearsSessionQueue guards the key
-// normalization: a summarizing session is tracked in activeRequests under
-// the synthetic "<id>-summarize" key, while its queue is stored under the
-// real session ID. Passing the synthetic key straight to ClearQueue makes
-// it a silent no-op, so the queued RunID would never be notified.
-func TestCancelAll_SummarizeKeyClearsSessionQueue(t *testing.T) {
+// TestCancelAll_ShutdownDiscardsQueueOnBusySession covers the other half
+// of CancelAll's teardown set: a session reached through activeRequests
+// rather than through its queue. Summarize now registers under the plain
+// session ID like every other turn, so there is no synthetic key left to
+// normalize; what still has to hold is that a busy session's queue is
+// discarded and its queued RunID gets its terminal cancelled event.
+func TestCancelAll_ShutdownDiscardsQueueOnBusySession(t *testing.T) {
 	t.Parallel()
 
 	env := testEnv(t)
@@ -796,12 +847,11 @@ func TestCancelAll_SummarizeKeyClearsSessionQueue(t *testing.T) {
 	defer subCancel()
 	ch := broker.Subscribe(subCtx)
 
-	const sessionID = "cancel-all-summarize"
-	summarizeKey := sessionID + summarizeKeySuffix
-	// Releasing the active entry mirrors Summarize's cleanup, so
-	// CancelAll's busy-wait finishes immediately.
-	a.activeRequests.Set(summarizeKey, &activeCancel{
-		cancel: func() { a.activeRequests.Del(summarizeKey) },
+	const sessionID = "cancel-all-busy"
+	// Releasing the active entry mirrors a turn's cleanup, so CancelAll's
+	// busy-wait finishes immediately.
+	a.activeRequests.Set(sessionID, &activeCancel{
+		cancel: func() { a.activeRequests.Del(sessionID) },
 	})
 	a.messageQueue.Set(sessionID, []SessionAgentCall{
 		{SessionID: sessionID, RunID: "run-queued", Prompt: "queued", acceptSeq: 1},
@@ -811,5 +861,5 @@ func TestCancelAll_SummarizeKeyClearsSessionQueue(t *testing.T) {
 
 	requireCancelledRunCompletes(t, ch, sessionID, "run-queued")
 	require.Equal(t, 0, a.QueuedPrompts(sessionID),
-		"the summarize key must be normalized to the session whose queue it owns")
+		"shutdown must discard the queue of a session that is still busy")
 }

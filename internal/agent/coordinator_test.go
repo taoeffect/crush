@@ -59,7 +59,7 @@ func (m *mockSessionAgent) PopQueuedMessage(sessionID string) (QueuedMessage, bo
 	return m.popped, m.popOK
 }
 
-func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
+func (m *mockSessionAgent) Summarize(context.Context, SummarizeCall) error {
 	return nil
 }
 func (m *mockSessionAgent) GenerateTitle(context.Context, string, string) {}
@@ -113,6 +113,14 @@ func newMockAgent(providerID string, maxTokens int64, runFunc func(context.Conte
 	}
 }
 
+// mockRunModels builds the run model pair a sub-agent turn inherits,
+// from the mock's own model. runSubAgent reads the run's models rather
+// than the agent's, so tests have to supply them.
+func mockRunModels(m *mockSessionAgent) *runModels {
+	selection := modelSelection{Large: m.model.ModelCfg, Small: m.model.ModelCfg}
+	return newRunModels(selection, true, m.model, m.model)
+}
+
 // agentResultWithText creates a minimal AgentResult with the given text response.
 func agentResultWithText(text string) *fantasy.AgentResult {
 	return &fantasy.AgentResult{
@@ -143,6 +151,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -152,6 +161,46 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "done", resp.Content)
 		assert.False(t, resp.IsError)
+	})
+
+	t.Run("uses the spawning run's model, not the agent's", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		// The sub-agent was built with the workspace's model. The run
+		// that spawned it asked for a different one, and that is what
+		// the delegated turn has to use.
+		agent := newMockAgent("workspace-provider", 4096, nil)
+		runModel := Model{
+			CatwalkCfg: catwalk.Model{DefaultMaxTokens: 1234},
+			ModelCfg:   config.SelectedModel{Provider: providerID, Model: "run-model"},
+		}
+		models := newRunModels(
+			modelSelection{Large: runModel.ModelCfg, Small: runModel.ModelCfg},
+			true, runModel, runModel,
+		)
+		agent.runFunc = func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			assert.Equal(t, int64(1234), call.MaxOutputTokens,
+				"the delegated turn must be sized by the run's model")
+			assert.Same(t, models, call.Models,
+				"the delegated turn must run on the spawning run's models")
+			return agentResultWithText("done"), nil
+		}
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			Models:         models,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "do something",
+			SessionTitle:   "Test Session",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "done", resp.Content)
 	})
 
 	t.Run("cost update failure preserves output", func(t *testing.T) {
@@ -164,6 +213,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      "missing-parent-session",
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -188,6 +238,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -212,6 +263,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -236,6 +288,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -272,6 +325,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -297,6 +351,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		_, err = coord.runSubAgent(ctx, subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -318,6 +373,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		_, err = coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -341,6 +397,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
@@ -353,31 +410,34 @@ func TestRunSubAgent(t *testing.T) {
 		assert.Equal(t, "Failed to generate response: provider request failed", resp.Content)
 	})
 
-	t.Run("session setup callback is invoked", func(t *testing.T) {
+	t.Run("auto-approval is passed to the child turn", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
 		parentSession, err := env.sessions.Create(t.Context(), "Parent")
 		require.NoError(t, err)
 
-		var setupCalledWith string
-		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+		var gotCall SessionAgentCall
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			gotCall = call
 			return agentResultWithText("ok"), nil
 		})
 
 		_, err = coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
 			Prompt:         "test",
 			SessionTitle:   "Test",
-			SessionSetup: func(sessionID string) {
-				setupCalledWith = sessionID
-			},
+			AutoApprove:    true,
 		})
 		require.NoError(t, err)
-		assert.NotEmpty(t, setupCalledWith, "SessionSetup should have been called")
+		assert.True(t, gotCall.AutoApprove,
+			"the child turn must take its own hold, not rely on the parent's session")
+		assert.NotEqual(t, parentSession.ID, gotCall.SessionID,
+			"the hold must be taken on the child session")
 	})
 
 	t.Run("cost propagation to parent session", func(t *testing.T) {
@@ -403,6 +463,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		_, err = coord.runSubAgent(t.Context(), subAgentParams{
 			Agent:          agent,
+			Models:         mockRunModels(agent),
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
