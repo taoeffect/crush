@@ -90,7 +90,10 @@ func (b *Backend) SendMessage(workspaceID string, msg proto.AgentMessage) error 
 // reported under that prompt's RunID and no fallback terminal event is
 // emitted: the run that failed published its own inside Run, and
 // msg.RunID's prompt is still queued, owing exactly one terminal event
-// when its own turn ends.
+// when its own turn ends. msg.AutoApprove travels the same way: the
+// agent takes a permission hold for the turn it actually runs, so the
+// approval cannot outlive the run or be revoked out from under it by a
+// client that exited.
 func (b *Backend) runAgent(ws *Workspace, msg proto.AgentMessage, accept *agent.AcceptedRun) {
 	defer ws.runWG.Done()
 	defer accept.Close()
@@ -98,6 +101,9 @@ func (b *Backend) runAgent(ws *Workspace, msg proto.AgentMessage, accept *agent.
 	ctx := ws.ctx
 	if msg.RunID != "" {
 		ctx = agent.WithRunID(ctx, msg.RunID)
+	}
+	if msg.AutoApprove {
+		ctx = agent.WithAutoApprove(ctx)
 	}
 	ctx = agent.WithRunCompleteMarker(ctx)
 
