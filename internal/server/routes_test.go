@@ -83,6 +83,8 @@ func TestRoutesReachTheirHandlers(t *testing.T) {
 	}
 
 	t.Run("pop queued prompt", func(t *testing.T) {
+		t.Parallel()
+
 		status, body := do(t, http.MethodPost,
 			"/v1/workspaces/"+wsID+"/agent/sessions/S1/prompts/pop")
 		require.Equal(t, http.StatusOK, status)
@@ -96,6 +98,8 @@ func TestRoutesReachTheirHandlers(t *testing.T) {
 	})
 
 	t.Run("cancel run", func(t *testing.T) {
+		t.Parallel()
+
 		// Cancelling a run the server never registered is a success,
 		// so a 200 here is the handler's answer and not the mux's.
 		status, _ := do(t, http.MethodPost,
@@ -104,6 +108,8 @@ func TestRoutesReachTheirHandlers(t *testing.T) {
 	})
 
 	t.Run("has config field", func(t *testing.T) {
+		t.Parallel()
+
 		status, body := do(t, http.MethodGet,
 			"/v1/workspaces/"+wsID+"/config/has?scope=global&key=models.large")
 		require.Equal(t, http.StatusOK, status)
@@ -114,6 +120,8 @@ func TestRoutesReachTheirHandlers(t *testing.T) {
 	})
 
 	t.Run("save model choices as default", func(t *testing.T) {
+		t.Parallel()
+
 		status, body := do(t, http.MethodPost,
 			"/v1/workspaces/"+wsID+"/config/model/default")
 		require.Equal(t, http.StatusBadRequest, status)

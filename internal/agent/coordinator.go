@@ -1278,18 +1278,18 @@ func (c *coordinator) buildModels(ctx context.Context, selection modelSelection,
 	}
 
 	return Model{
-		Model:              largeModel,
-		CatwalkCfg:         *largeCatwalkModel,
-		ModelCfg:           largeModelCfg,
-		FlatRate:           largeProviderCfg.FlatRate,
-		SystemPromptPrefix: largeProviderCfg.SystemPromptPrefix,
-	}, Model{
-		Model:              smallModel,
-		CatwalkCfg:         *smallCatwalkModel,
-		ModelCfg:           smallModelCfg,
-		FlatRate:           smallProviderCfg.FlatRate,
-		SystemPromptPrefix: smallProviderCfg.SystemPromptPrefix,
-	}, nil
+			Model:              largeModel,
+			CatwalkCfg:         *largeCatwalkModel,
+			ModelCfg:           largeModelCfg,
+			FlatRate:           largeProviderCfg.FlatRate,
+			SystemPromptPrefix: largeProviderCfg.SystemPromptPrefix,
+		}, Model{
+			Model:              smallModel,
+			CatwalkCfg:         *smallCatwalkModel,
+			ModelCfg:           smallModelCfg,
+			FlatRate:           smallProviderCfg.FlatRate,
+			SystemPromptPrefix: smallProviderCfg.SystemPromptPrefix,
+		}, nil
 }
 
 // hyperAPIKey picks up refreshed credentials for the next credits fetch.
