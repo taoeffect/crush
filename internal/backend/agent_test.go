@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -27,9 +28,12 @@ type blockingCoordinator struct {
 	release  chan struct{}
 	runCount atomic.Int32
 
-	mu       sync.Mutex
-	running  map[string]bool
-	canceled []string
+	mu               sync.Mutex
+	running          map[string]bool
+	canceled         []string
+	setMainAgentErr  error
+	lastMainAgentSet atomic.Value
+	busy             bool
 }
 
 func newBlockingCoordinator() *blockingCoordinator {
@@ -77,7 +81,7 @@ func (c *blockingCoordinator) CancelAll() {}
 func (c *blockingCoordinator) IsBusy() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.running) > 0
+	return c.busy || len(c.running) > 0
 }
 
 func (c *blockingCoordinator) IsSessionBusy(sessionID string) bool {
@@ -99,6 +103,10 @@ func (c *blockingCoordinator) Summarize(context.Context, string) error       { r
 func (c *blockingCoordinator) Model() agent.Model                            { return agent.Model{} }
 func (c *blockingCoordinator) UpdateModels(context.Context) error            { return nil }
 func (c *blockingCoordinator) GenerateTitle(context.Context, string, string) {}
+func (c *blockingCoordinator) SetMainAgent(agentName string) error {
+	c.lastMainAgentSet.Store(agentName)
+	return c.setMainAgentErr
+}
 
 // insertAgentWorkspace installs a synthetic workspace with the given
 // coordinator (or none) and a workspace run context, mirroring the
@@ -341,4 +349,54 @@ func TestInitAgent_KeepsRunningWorkReachable(t *testing.T) {
 
 	close(coord.release)
 	ws.runWG.Wait()
+}
+
+func TestSetMainAgent_WorkspaceNotFound(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBackend(t)
+	err := b.SetMainAgent("nope", "plan")
+	require.ErrorIs(t, err, ErrWorkspaceNotFound)
+}
+
+func TestSetMainAgent_AgentNotInitialized(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBackend(t)
+	ws := insertAgentWorkspace(t, b, nil)
+	err := b.SetMainAgent(ws.ID, "plan")
+	require.ErrorIs(t, err, ErrAgentNotInitialized)
+}
+
+func TestSetMainAgent_Success(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBackend(t)
+	coord := newBlockingCoordinator()
+	ws := insertAgentWorkspace(t, b, coord)
+
+	err := b.SetMainAgent(ws.ID, "plan")
+	require.NoError(t, err)
+	require.Equal(t, "plan", coord.lastMainAgentSet.Load())
+}
+
+func TestSetMainAgent_RejectedWhileBusy(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBackend(t)
+	coord := newBlockingCoordinator()
+	coord.busy = true
+	ws := insertAgentWorkspace(t, b, coord)
+
+	err := b.SetMainAgent(ws.ID, "plan")
+	require.ErrorIs(t, err, ErrAgentBusy)
+	require.Nil(t, coord.lastMainAgentSet.Load(), "busy agent must not be switched")
+}
+
+func TestSetMainAgent_PropagatesCoordinatorError(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBackend(t)
+	coord := newBlockingCoordinator()
+	wantErr := errors.New("main agent not found: 123")
+	coord.setMainAgentErr = wantErr
+	ws := insertAgentWorkspace(t, b, coord)
+
+	err := b.SetMainAgent(ws.ID, "123")
+	require.ErrorIs(t, err, wantErr)
 }

@@ -10,7 +10,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -21,7 +20,6 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
-	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/x/etag"
@@ -59,25 +57,10 @@ func IsMissingLiveProviderCredentials(err error) bool {
 	return errors.Is(err, errMissingLiveProviderCredentials)
 }
 
-// file to cache provider data
+// File to cache provider data. It resolves through GlobalConfigData so the
+// catalog follows CRUSH_GLOBAL_DATA like the rest of the data directory.
 func cachePathFor(name string) string {
-	xdgDataHome := os.Getenv("XDG_DATA_HOME")
-	if xdgDataHome != "" {
-		return filepath.Join(xdgDataHome, appName, name+".json")
-	}
-
-	// return the path to the main data directory
-	// for windows, it should be in `%LOCALAPPDATA%/crush/`
-	// for linux and macOS, it should be in `$HOME/.local/share/crush/`
-	if runtime.GOOS == "windows" {
-		localAppData := os.Getenv("LOCALAPPDATA")
-		if localAppData == "" {
-			localAppData = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local")
-		}
-		return filepath.Join(localAppData, appName, name+".json")
-	}
-
-	return filepath.Join(home.Dir(), ".local", "share", appName, name+".json")
+	return filepath.Join(filepath.Dir(GlobalConfigData()), name+".json")
 }
 
 // UpdateProviders updates the Catwalk providers list from a specified source.
@@ -115,9 +98,9 @@ func UpdateProviders(pathOrURL string) error {
 	return nil
 }
 
-// resolveHyperAPIKey returns the Hyper API key from the environment or
+// ResolveHyperAPIKey returns the Hyper API key from the environment or
 // the raw config value. The env var takes precedence.
-func resolveHyperAPIKey(cfg *Config) string {
+func ResolveHyperAPIKey(cfg *Config) string {
 	if key := os.Getenv("HYPER_API_KEY"); key != "" {
 		return key
 	}
@@ -147,7 +130,7 @@ func UpdateHyper(pathOrURL string) error {
 	case strings.HasPrefix(pathOrURL, "http://") || strings.HasPrefix(pathOrURL, "https://"):
 		client := realHyperClient{
 			baseURL:    pathOrURL,
-			resolveKey: func() string { return resolveHyperAPIKey(nil) },
+			resolveKey: func() string { return ResolveHyperAPIKey(nil) },
 		}
 		var err error
 		provider, err = client.Get(context.Background(), "")
@@ -259,7 +242,7 @@ func Providers(cfg *Config, opts ...HyperTokenRefresher) ([]catwalk.Provider, er
 			}
 			hyperSyncer.Init(realHyperClient{
 				baseURL:      hyper.BaseURL(),
-				resolveKey:   func() string { return resolveHyperAPIKey(cfgSnapshot) },
+				resolveKey:   func() string { return ResolveHyperAPIKey(cfgSnapshot) },
 				refreshToken: refresher,
 			}, path, autoupdate)
 

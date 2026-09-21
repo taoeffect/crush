@@ -183,15 +183,16 @@ func (a AgentInfo) IsZero() bool {
 // client ID; an empty value means "unowned" and leaves the run bounded
 // only by the server's maximum run duration.
 type AgentMessage struct {
-	SessionID      string                `json:"session_id"`
-	RunID          string                `json:"run_id,omitempty"`
-	ClientID       string                `json:"client_id,omitempty"`
-	Prompt         string                `json:"prompt"`
-	Attachments    []Attachment          `json:"attachments,omitempty"`
-	AutoApprove    bool                  `json:"auto_approve,omitempty"`
-	NonInteractive bool                  `json:"non_interactive,omitempty"`
-	LargeModel     *config.SelectedModel `json:"large_model,omitempty"`
-	SmallModel     *config.SelectedModel `json:"small_model,omitempty"`
+	HiddenUserMessage bool                  `json:"hidden_user_message,omitempty"`
+	SessionID         string                `json:"session_id"`
+	RunID             string                `json:"run_id,omitempty"`
+	ClientID          string                `json:"client_id,omitempty"`
+	Prompt            string                `json:"prompt"`
+	Attachments       []Attachment          `json:"attachments,omitempty"`
+	AutoApprove       bool                  `json:"auto_approve,omitempty"`
+	NonInteractive    bool                  `json:"non_interactive,omitempty"`
+	LargeModel        *config.SelectedModel `json:"large_model,omitempty"`
+	SmallModel        *config.SelectedModel `json:"small_model,omitempty"`
 }
 
 // ShellCommandRequest represents a request to run a shell command directly.

@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type testResolver map[string]string
+type kagiTestResolver map[string]string
 
-func (r testResolver) ResolveValue(value string) (string, error) {
+func (r kagiTestResolver) ResolveValue(value string) (string, error) {
 	return r[value], nil
 }
 
@@ -31,7 +31,7 @@ func TestToolWebSearchResolvedKagiAPIKey(t *testing.T) {
 	t.Parallel()
 
 	cfg := ToolWebSearch{KagiAPIKey: "$KAGI_API_KEY"}
-	resolver := testResolver{"$KAGI_API_KEY": "resolved-key"}
+	resolver := kagiTestResolver{"$KAGI_API_KEY": "resolved-key"}
 
 	require.Equal(t, "resolved-key", cfg.ResolvedKagiAPIKey(resolver))
 	require.Equal(t, "$KAGI_API_KEY", cfg.ResolvedKagiAPIKey(nil))

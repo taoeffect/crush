@@ -342,7 +342,8 @@ func TestLoadSession_NoSessionModelsFallsBackToTranscript(t *testing.T) {
 	ws.messages = legacyTranscript()
 
 	ui.Update(loadSessionMsg{
-		session: &session.Session{ID: "sess-L"},
+		session:  &session.Session{ID: "sess-L"},
+		messages: legacyTranscript(),
 	})
 
 	// The fallback restores the large model and, because the config has

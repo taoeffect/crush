@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -111,16 +110,17 @@ type SessionAgentCall struct {
 	// `agent` tool sets it: a delegated turn inherits the spawning
 	// run's models, and one shared sub-agent instance serves every
 	// parent run, so its prompt cannot live on the instance.
-	SystemPrompt     string
-	Prompt           string
-	ProviderOptions  fantasy.ProviderOptions
-	Attachments      []message.Attachment
-	MaxOutputTokens  int64
-	Temperature      *float64
-	TopP             *float64
-	TopK             *int64
-	FrequencyPenalty *float64
-	PresencePenalty  *float64
+	SystemPrompt      string
+	HiddenUserMessage bool
+	Prompt            string
+	ProviderOptions   fantasy.ProviderOptions
+	Attachments       []message.Attachment
+	MaxOutputTokens   int64
+	Temperature       *float64
+	TopP              *float64
+	TopK              *int64
+	FrequencyPenalty  *float64
+	PresencePenalty   *float64
 	// SubAgent marks a turn started by the `agent` tool on a child
 	// session. Such a turn publishes no user-facing "agent finished"
 	// notification: the parent turn is still running and owns that
@@ -1640,6 +1640,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				}
 			}
 			currentAssistant.AddFinish(finishReason, "", "")
+			currentAssistant.PrismModelID, currentAssistant.PrismModelName = extractPrismModel(stepResult.ProviderMetadata)
+			currentAssistant.PrismHypercreditSavings, currentAssistant.PrismDollarSavings = extractPrismSavings(stepResult.ProviderMetadata)
 			sessionLock.Lock()
 			defer sessionLock.Unlock()
 
@@ -1649,7 +1651,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
 			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
-			extractHyperCredits(stepResult.ProviderMetadata)
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)
 			if sessionErr != nil {
 				return sessionErr
@@ -1741,10 +1742,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		}
 		var fantasyErr *fantasy.Error
 		var providerErr *fantasy.ProviderError
+		var requestTimedOutErr *requestTimeoutError
 		const defaultTitle = "Provider Error"
 		linkStyle := lipgloss.NewStyle().Foreground(charmtone.Guac).Underline(true)
 		if isCancelErr {
 			currentAssistant.AddFinish(message.FinishReasonCanceled, "User canceled request", "")
+		} else if errors.As(err, &requestTimedOutErr) {
+			// Checked before the provider branches so a deadline our own
+			// request timeout imposed is never reported as a provider error.
+			currentAssistant.AddFinish(message.FinishReasonError, "Request timed out", requestTimedOutErr.userMessage())
 		} else if isHyper && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized {
 			currentAssistant.AddFinish(message.FinishReasonError, "Unauthorized", `Please re-authenticate with Hyper. You can also run "crush auth" to re-authenticate.`)
 		} else if errors.As(err, &providerErr) {
@@ -2165,7 +2171,6 @@ func (a *sessionAgent) summarizeSession(ctx, genCtx context.Context, call Summar
 			}
 			openrouterCost = &newCost
 		}
-		extractHyperCredits(step.ProviderMetadata)
 	}
 
 	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, false)
@@ -2269,7 +2274,7 @@ func sessionHeaders(sessionID string) map[string]string {
 }
 
 func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentCall) (message.Message, error) {
-	parts := []message.ContentPart{message.TextContent{Text: call.Prompt}}
+	parts := []message.ContentPart{message.TextContent{Text: call.Prompt, Hidden: call.HiddenUserMessage}}
 	var attachmentParts []message.ContentPart
 	for _, attachment := range call.Attachments {
 		attachmentParts = append(attachmentParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
@@ -2297,27 +2302,52 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			),
 		))
 	}
-	// Index every stored tool result by the ID of the tool call it
-	// answers. Provider APIs require a tool result to sit directly
-	// behind the message holding its call, and the stored order does
-	// not guarantee that: a transcript repaired at the end of a turn
-	// appends the missing results after the later assistant messages.
-	// Pairing by ID instead of by position keeps the prompt valid
-	// wherever a result was stored. The first result stored for a call
-	// wins, so a repair row can never displace a real result.
-	resultsByToolCallID := make(map[string]message.ToolResult)
+	// Collect all tool call IDs present in assistant messages, then index
+	// every tool result by its call ID. Tool results are re-emitted right
+	// after the assistant message that requested them instead of at their
+	// stored position: messages can be written to a session concurrently
+	// (e.g. resuming while a tool is still running), which interleaves
+	// user messages between a tool call and its result. LLM APIs require
+	// every tool call to be followed by its results before any other
+	// message, and strict-adjacency providers (e.g. Kimi, DeepSeek) reject
+	// the request otherwise, permanently locking the session.
+	knownToolCallIDs := make(map[string]struct{})
+	for _, m := range msgs {
+		if m.Role != message.Assistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls() {
+			knownToolCallIDs[tc.ID] = struct{}{}
+		}
+	}
+	toolResultsByCall := make(map[string][]fantasy.MessagePart)
 	for _, m := range msgs {
 		if m.Role != message.Tool {
 			continue
 		}
-		for _, tr := range m.ToolResults() {
-			if _, seen := resultsByToolCallID[tr.ToolCallID]; seen {
-				continue
+		for _, aiMsg := range m.ToAIMessage() {
+			for _, part := range aiMsg.Content {
+				tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part)
+				if !ok {
+					// Tool-role ToAIMessage only emits ToolResultParts today;
+					// log so unexpected parts do not vanish silently.
+					slog.Warn(
+						"Dropping unexpected non-tool-result part from tool message",
+						"part_type", fmt.Sprintf("%T", part),
+					)
+					continue
+				}
+				if _, known := knownToolCallIDs[tr.ToolCallID]; !known {
+					slog.Warn(
+						"Dropping orphaned tool result with no matching tool call",
+						"tool_call_id", tr.ToolCallID,
+					)
+					continue
+				}
+				toolResultsByCall[tr.ToolCallID] = append(toolResultsByCall[tr.ToolCallID], part)
 			}
-			resultsByToolCallID[tr.ToolCallID] = tr
 		}
 	}
-	paired := make(map[string]struct{}, len(resultsByToolCallID))
 
 	for _, m := range msgs {
 		if len(m.Parts) == 0 {
@@ -2327,10 +2357,7 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		if m.Role == message.Assistant && len(m.ToolCalls()) == 0 && m.Content().Text == "" && m.ReasoningContent().String() == "" {
 			continue
 		}
-		// Tool messages are never emitted from their stored position:
-		// every result is emitted behind its own call below, and one
-		// with no matching call is dropped (it would fail API
-		// validation on every later turn, locking the session).
+		// Tool results are emitted right after their assistant message.
 		if m.Role == message.Tool {
 			continue
 		}
@@ -2344,19 +2371,8 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		}
 		history = append(history, aiMsgs...)
 
-		if m.Role == message.Assistant {
-			if msg, ok := toolResultsForCalls(m, resultsByToolCallID, paired); ok {
-				history = append(history, msg)
-			}
-		}
-	}
-
-	for id := range resultsByToolCallID {
-		if _, ok := paired[id]; !ok {
-			slog.Warn(
-				"Dropping orphaned tool result with no matching tool call",
-				"tool_call_id", id,
-			)
+		if m.Role == message.Assistant && len(m.ToolCalls()) > 0 {
+			history = append(history, toolResultsForCalls(m, toolResultsByCall))
 		}
 	}
 
@@ -2392,29 +2408,22 @@ func filterFileParts(parts []fantasy.MessagePart) []fantasy.MessagePart {
 	return filtered
 }
 
-// toolResultsForCalls returns the tool message that answers every tool
-// call in the given assistant message: the stored result when one
-// exists, or a synthetic error result when none does. It records the
-// tool call IDs it answered in paired so a stored result is emitted
-// exactly once.
-//
-// LLM APIs require every tool call to be answered directly behind the
-// message that made it. An interrupted session leaves calls with no
-// result at all, and a session whose transcript was repaired at the end
-// of a turn stores the missing results after later messages; either
-// shape fails API validation on every subsequent turn and permanently
-// locks the conversation.
-func toolResultsForCalls(m message.Message, results map[string]message.ToolResult, paired map[string]struct{}) (fantasy.Message, bool) {
-	toolCalls := m.ToolCalls()
-	if len(toolCalls) == 0 {
-		return fantasy.Message{}, false
-	}
-	parts := make([]message.ContentPart, 0, len(toolCalls))
-	for _, tc := range toolCalls {
-		result, ok := results[tc.ID]
-		if _, alreadyPaired := paired[tc.ID]; ok && !alreadyPaired {
-			paired[tc.ID] = struct{}{}
-			parts = append(parts, result)
+// toolResultsForCalls builds the tool message that must immediately follow
+// an assistant message with tool calls. LLM APIs require every tool call to
+// be followed by its results before any other message; strict-adjacency
+// providers reject the request otherwise. Results are taken from
+// toolResultsByCall and consumed, so a result stored in a message that also
+// holds results for calls of other assistant messages is emitted exactly
+// once, next to the assistant that requested it. Tool calls without any
+// stored result (e.g. an interrupted session) receive a synthetic error
+// response so the conversation keeps working.
+func toolResultsForCalls(m message.Message, toolResultsByCall map[string][]fantasy.MessagePart) fantasy.Message {
+	content := make([]fantasy.MessagePart, 0, len(m.ToolCalls()))
+	for _, tc := range m.ToolCalls() {
+		parts := toolResultsByCall[tc.ID]
+		delete(toolResultsByCall, tc.ID)
+		if len(parts) > 0 {
+			content = append(content, parts...)
 			continue
 		}
 		slog.Warn(
@@ -2422,23 +2431,23 @@ func toolResultsForCalls(m message.Message, results map[string]message.ToolResul
 			"tool_call_id", tc.ID,
 			"tool_name", tc.Name,
 		)
-		parts = append(parts, message.ToolResult{
+		content = append(content, fantasy.ToolResultPart{
 			ToolCallID: tc.ID,
-			Name:       tc.Name,
-			Content:    "tool call was interrupted and did not produce a result, you may retry this call if the result is still needed",
-			IsError:    true,
+			Output: fantasy.ToolResultOutputContentError{
+				Error: errors.New("tool call was interrupted and did not produce a result, you may retry this call if the result is still needed"),
+			},
 		})
 	}
-	toolMsg := message.Message{Role: message.Tool, Parts: parts}
-	aiMsgs := toolMsg.ToAIMessage()
-	if len(aiMsgs) == 0 {
-		return fantasy.Message{}, false
+	return fantasy.Message{
+		Role:    fantasy.MessageRoleTool,
+		Content: content,
 	}
-	return aiMsgs[0], true
 }
 
 func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.Session) ([]message.Message, error) {
-	msgs, err := a.messages.List(ctx, session.ID)
+	// Read only the tail a compacted session actually sends. The full
+	// transcript can be tens of megabytes on the single shared connection.
+	msgs, err := a.messages.ListFromSummary(ctx, session.ID, session.SummaryMessageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list messages: %w", err)
 	}
@@ -2617,7 +2626,6 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 			}
 			openrouterCost = &newCost
 		}
-		extractHyperCredits(step.ProviderMetadata)
 	}
 
 	modelConfig := model.CatwalkCfg
@@ -2662,23 +2670,49 @@ func (a *sessionAgent) openrouterCost(metadata fantasy.ProviderMetadata) *float6
 	return &opts.Usage.Cost
 }
 
-// extractHyperCredits reads usage.remaining.hypercredits from OpenAI
-// provider metadata and stores it for the next FetchCredits call.
-func extractHyperCredits(metadata fantasy.ProviderMetadata) {
+// extractPrismModel returns the ID and name of the model that actually
+// served the turn, as reported by the Hyper Prism model router headers,
+// or empty strings when the turn was not routed through a Prism model.
+func extractPrismModel(metadata fantasy.ProviderMetadata) (modelID, modelName string) {
 	openaiMeta, ok := metadata[openai.Name]
 	if !ok {
-		return
+		return "", ""
 	}
 	pm, ok := openaiMeta.(*openai.ProviderMetadata)
 	if !ok {
-		return
+		return "", ""
 	}
-	var remaining struct {
-		Hypercredits float64 `json:"hypercredits"`
+	_ = pm.ExtraField(hyper.PrismModelIDField, &modelID)
+	_ = pm.ExtraField(hyper.PrismModelNameField, &modelName)
+	return modelID, modelName
+}
+
+// extractPrismSavings returns the hypercredit and dollar savings from
+// routing the turn through the Hyper Prism model router, as reported by
+// its savings trailers, or nil when not reported or malformed.
+func extractPrismSavings(metadata fantasy.ProviderMetadata) (hypercredits, dollars *float64) {
+	openaiMeta, ok := metadata[openai.Name]
+	if !ok {
+		return nil, nil
 	}
-	if pm.ExtraField("remaining", &remaining) && remaining.Hypercredits > 0 {
-		hyper.SetBalance(int(math.Round(remaining.Hypercredits)))
+	pm, ok := openaiMeta.(*openai.ProviderMetadata)
+	if !ok {
+		return nil, nil
 	}
+	return extraFieldFloat(pm, hyper.PrismHypercreditSavingsField), extraFieldFloat(pm, hyper.PrismDollarSavingsField)
+}
+
+func extraFieldFloat(pm *openai.ProviderMetadata, key string) *float64 {
+	var value string
+	if !pm.ExtraField(key, &value) {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		slog.Warn("Could not parse Prism savings", "key", key, "value", value, "error", err)
+		return nil
+	}
+	return &parsed
 }
 
 func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimated bool) {

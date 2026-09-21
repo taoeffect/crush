@@ -11,16 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// blockingListService holds the nth messages.List call open. That call is
-// the observation point for session ownership during a summarize:
-// summarizeSession reads the transcript through it, after the frame that
-// owns the session has registered but before anything streams.
+// blockingTranscriptService holds the nth transcript read open. That
+// read is the observation point for session ownership during a
+// summarize: summarizeSession reads the transcript through it, after
+// the frame that owns the session has registered but before anything
+// streams.
 //
-// List is called exactly once per Run and once per summarize, so the call
-// index identifies the caller: n=1 is a bare Summarize, n=2 is the
-// auto-compaction inside a turn whose own List was n=1. Title generation
-// does not read messages, so no goroutine can shift the count.
-type blockingListService struct {
+// getSessionMessages is the only caller of ListFromSummary, and it runs
+// exactly once per Run and once per summarize, so the call index
+// identifies the caller: n=1 is a bare Summarize, n=2 is the
+// auto-compaction inside a turn whose own read was n=1. Title generation
+// does not read the transcript, so no goroutine can shift the count.
+//
+// The interception point must be ListFromSummary rather than List:
+// ListFromSummary delegates to the concrete service's own List, so an
+// embedded override of List never sees the summarize's read.
+type blockingTranscriptService struct {
 	message.Service
 	n       int64
 	calls   atomic.Int64
@@ -28,7 +34,7 @@ type blockingListService struct {
 	gate    chan struct{}
 }
 
-func (s *blockingListService) List(ctx context.Context, sessionID string) ([]message.Message, error) {
+func (s *blockingTranscriptService) ListFromSummary(ctx context.Context, sessionID, summaryMessageID string) ([]message.Message, error) {
 	if s.calls.Add(1) == s.n {
 		close(s.entered)
 		select {
@@ -36,7 +42,7 @@ func (s *blockingListService) List(ctx context.Context, sessionID string) ([]mes
 		case <-ctx.Done():
 		}
 	}
-	return s.Service.List(ctx, sessionID)
+	return s.Service.ListFromSummary(ctx, sessionID, summaryMessageID)
 }
 
 // seedUserMessage gives the session something to summarize and a user
@@ -65,7 +71,7 @@ func seedUserMessage(t *testing.T, env fakeEnv, sessionID string) {
 func TestSummarize_OwnsSessionBeforeItReadsTheTranscript(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	blocking := &blockingListService{
+	blocking := &blockingTranscriptService{
 		Service: env.messages,
 		n:       1,
 		entered: make(chan struct{}),
@@ -122,7 +128,7 @@ func TestSummarize_OwnsSessionBeforeItReadsTheTranscript(t *testing.T) {
 func TestSummarize_IsCancellableBeforeItStreams(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	blocking := &blockingListService{
+	blocking := &blockingTranscriptService{
 		Service: env.messages,
 		n:       1,
 		entered: make(chan struct{}),
@@ -183,7 +189,7 @@ func TestRun_InTurnSummarizeKeepsSessionOwnedByTheTurn(t *testing.T) {
 	env := testEnv(t)
 	// n=2: the turn's own transcript read is the first List call, the
 	// in-turn summarize's is the second.
-	blocking := &blockingListService{
+	blocking := &blockingTranscriptService{
 		Service: env.messages,
 		n:       2,
 		entered: make(chan struct{}),

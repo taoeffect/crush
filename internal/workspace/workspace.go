@@ -160,6 +160,7 @@ type Workspace interface {
 	// AgentPopQueuedMessage removes and returns the newest queued
 	// message; the bool reports whether anything was queued.
 	AgentPopQueuedMessage(sessionID string) (agent.QueuedMessage, bool, error)
+	AgentSetMain(agentID string) error
 	AgentSummarize(ctx context.Context, sessionID string) error
 	UpdateAgentModel(ctx context.Context) error
 	InitCoderAgent(ctx context.Context) error
@@ -215,6 +216,7 @@ type Workspace interface {
 	SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error
 	SetConfigField(scope config.Scope, key string, value any) error
 	HasConfigField(scope config.Scope, key string) (bool, error)
+	SetConfigFields(scope config.Scope, fields map[string]any) error
 	RemoveConfigField(scope config.Scope, key string) error
 	ImportCopilot() (*oauth.Token, bool)
 	RefreshOAuthToken(ctx context.Context, scope config.Scope, providerID string) error

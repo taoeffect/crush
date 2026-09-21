@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/anim"
+	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/charmbracelet/x/ansi"
@@ -54,6 +55,11 @@ crush run --quiet "Generate a README for this project"
 # Run in verbose mode (show logs)
 crush run --verbose "Generate a README for this project"
 
+# Use a specific reasoning effort
+# Levels depend on the model, unsupported values are rejected
+# with the accepted values listed
+crush run --reasoning-effort high "What is the meaning of life?"
+
 # Continue a previous session
 crush run --session {session-id} "Follow up on your last response"
 
@@ -63,12 +69,13 @@ crush run --continue "Follow up on your last response"
   `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var (
-			quiet, _      = cmd.Flags().GetBool("quiet")
-			verbose, _    = cmd.Flags().GetBool("verbose")
-			largeModel, _ = cmd.Flags().GetString("model")
-			smallModel, _ = cmd.Flags().GetString("small-model")
-			sessionID, _  = cmd.Flags().GetString("session")
-			useLast, _    = cmd.Flags().GetBool("continue")
+			quiet, _           = cmd.Flags().GetBool("quiet")
+			verbose, _         = cmd.Flags().GetBool("verbose")
+			largeModel, _      = cmd.Flags().GetString("model")
+			smallModel, _      = cmd.Flags().GetString("small-model")
+			reasoningEffort, _ = cmd.Flags().GetString("reasoning-effort")
+			sessionID, _       = cmd.Flags().GetString("session")
+			useLast, _         = cmd.Flags().GetBool("continue")
 		)
 
 		// Cancel on SIGINT or SIGTERM.
@@ -126,7 +133,7 @@ crush run --continue "Follow up on your last response"
 				slog.SetDefault(slog.New(log.New(os.Stderr)))
 			}
 
-			return runNonInteractive(ctx, c, ws, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
+			return runNonInteractive(ctx, c, ws, prompt, largeModel, smallModel, reasoningEffort, quiet || verbose, sessionID, useLast)
 		}
 
 		ws, cleanup, err := setupLocalWorkspace(cmd)
@@ -155,7 +162,7 @@ crush run --continue "Follow up on your last response"
 			sessionID = sess.ID
 		}
 
-		return appWs.App().RunNonInteractive(ctx, os.Stdout, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
+		return appWs.App().RunNonInteractive(ctx, os.Stdout, prompt, largeModel, smallModel, reasoningEffort, quiet || verbose, sessionID, useLast)
 	},
 }
 
@@ -164,6 +171,7 @@ func init() {
 	runCmd.Flags().BoolP("verbose", "v", false, "Show logs")
 	runCmd.Flags().StringP("model", "m", "", "Model to use. Accepts 'model' or 'provider/model' to disambiguate models with the same name across providers")
 	runCmd.Flags().String("small-model", "", "Small model to use. If not provided, uses the default small model for the provider")
+	runCmd.Flags().String("reasoning-effort", "", "Reasoning effort for the model (e.g. low, medium, high). Levels depend on the model; unsupported values are rejected with the accepted values listed")
 	runCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	runCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
 	runCmd.MarkFlagsMutuallyExclusive("session", "continue")
@@ -175,7 +183,7 @@ func runNonInteractive(
 	ctx context.Context,
 	c *client.Client,
 	ws *proto.Workspace,
-	prompt, largeModel, smallModel string,
+	prompt, largeModel, smallModel, reasoningEffort string,
 	hideSpinner bool,
 	continueSessionID string,
 	useLast bool,
@@ -211,6 +219,9 @@ func runNonInteractive(
 			largeProvider = largeSel.Provider
 		}
 		t := styles.ThemeForProvider(largeProvider)
+		if common.ThemeNameFromConfig(ws.Config) != "" {
+			t = common.ThemeStylesFromConfig(ws.Config)
+		}
 
 		spinner = format.NewSpinner(ctx, cancel, anim.Settings{
 			Size:        10,
@@ -263,6 +274,13 @@ func runNonInteractive(
 		slog.Info("Created session for non-interactive run", "session_id", sess.ID)
 	}
 
+	if reasoningEffort != "" {
+		largeSel, err = overrideReasoningEffort(ws.Config, largeSel, reasoningEffort)
+		if err != nil {
+			return err
+		}
+	}
+
 	events, err := c.SubscribeEvents(ctx, ws.ID)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to events: %w", err)
@@ -280,8 +298,8 @@ func runNonInteractive(
 	// neither strands that turn nor leaves the session approved.
 	//
 	// NonInteractive says the same thing about tools: the turn must not
-	// be offered the question tool, and it waits for MCP servers to
-	// finish connecting because it gets one shot at the tool palette.
+	// be offered the question tool, and it gives MCP servers a bounded
+	// initialization window before taking its one shot at the tool palette.
 	// The workspace's agent may be shared with an attached TUI, so this
 	// travels per message rather than being set on the agent. So do the
 	// models, for the same reason.
@@ -695,6 +713,21 @@ func restoreModelFromSession(ctx context.Context, c *client.Client, ws *proto.Wo
 	}
 
 	return large, small, nil
+}
+
+// overrideReasoningEffort returns a run-local selection, validating
+// against the explicit or restored model rather than the workspace
+// default.
+func overrideReasoningEffort(cfg *config.Config, large *config.SelectedModel, reasoningEffort string) (*config.SelectedModel, error) {
+	selected, err := cfg.SelectionWithReasoningEffort(large, reasoningEffort)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("Overriding reasoning effort for non-interactive run",
+		"provider", selected.Provider,
+		"model", selected.Model,
+		"reasoning_effort", reasoningEffort)
+	return selected, nil
 }
 
 type modelMatch struct {

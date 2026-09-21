@@ -363,6 +363,10 @@ func (w *ClientWorkspace) AgentPopQueuedMessage(sessionID string) (agent.QueuedM
 	return w.client.PopAgentSessionQueuedMessage(context.Background(), w.workspaceID(), sessionID)
 }
 
+func (w *ClientWorkspace) AgentSetMain(agentID string) error {
+	return w.client.SetMainAgent(context.Background(), w.workspaceID(), agentID)
+}
+
 func (w *ClientWorkspace) AgentSummarize(ctx context.Context, sessionID string) error {
 	return w.client.AgentSummarizeSession(ctx, w.workspaceID(), sessionID)
 }
@@ -627,6 +631,15 @@ func (w *ClientWorkspace) SetConfigField(scope config.Scope, key string, value a
 
 func (w *ClientWorkspace) HasConfigField(scope config.Scope, key string) (bool, error) {
 	return w.client.HasConfigField(context.Background(), w.workspaceID(), scope, key)
+}
+
+func (w *ClientWorkspace) SetConfigFields(scope config.Scope, fields map[string]any) error {
+	for key, value := range fields {
+		if err := w.SetConfigField(scope, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (w *ClientWorkspace) RemoveConfigField(scope config.Scope, key string) error {
@@ -1347,20 +1360,24 @@ func protoToFile(f proto.File) history.File {
 
 func protoToMessage(m proto.Message) message.Message {
 	msg := message.Message{
-		ID:               m.ID,
-		SessionID:        m.SessionID,
-		Role:             message.MessageRole(m.Role),
-		Model:            m.Model,
-		Provider:         m.Provider,
-		CreatedAt:        m.CreatedAt,
-		UpdatedAt:        m.UpdatedAt,
-		IsSummaryMessage: m.IsSummaryMessage,
+		ID:                      m.ID,
+		SessionID:               m.SessionID,
+		Role:                    message.MessageRole(m.Role),
+		Model:                   m.Model,
+		Provider:                m.Provider,
+		PrismModelID:            m.PrismModelID,
+		PrismModelName:          m.PrismModelName,
+		PrismHypercreditSavings: m.PrismHypercreditSavings,
+		PrismDollarSavings:      m.PrismDollarSavings,
+		CreatedAt:               m.CreatedAt,
+		UpdatedAt:               m.UpdatedAt,
+		IsSummaryMessage:        m.IsSummaryMessage,
 	}
 
 	for _, p := range m.Parts {
 		switch v := p.(type) {
 		case proto.TextContent:
-			msg.Parts = append(msg.Parts, message.TextContent{Text: v.Text})
+			msg.Parts = append(msg.Parts, message.TextContent{Text: v.Text, Hidden: v.Hidden})
 		case proto.ReasoningContent:
 			msg.Parts = append(msg.Parts, message.ReasoningContent{
 				Thinking:   v.Thinking,

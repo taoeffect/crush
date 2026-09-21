@@ -100,7 +100,7 @@ func (s *failSummarySaveService) Save(ctx context.Context, sess session.Session)
 func TestSummarize_HandoffDropsQueuedPromptCoveredByCancel(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	blocking := &blockingListService{
+	blocking := &blockingTranscriptService{
 		Service: env.messages,
 		n:       1,
 		entered: make(chan struct{}),
@@ -174,7 +174,7 @@ func TestSummarize_FailedSummarizeStillRunsQueuedPrompts(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
 	env.sessions = &failSummarySaveService{Service: env.sessions}
-	blocking := &blockingListService{
+	blocking := &blockingTranscriptService{
 		Service: env.messages,
 		n:       1,
 		entered: make(chan struct{}),

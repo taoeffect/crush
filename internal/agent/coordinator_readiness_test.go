@@ -185,7 +185,7 @@ func TestFailedAgentBuildDoesNotPoisonLaterRuns(t *testing.T) {
 	broken, _, err := coord.buildAgent(ctx, p, agentCfg, false)
 	require.NoError(t, err)
 	buildErr := errors.New("build failed")
-	coord.setActiveAgent(config.AgentCoder, broken, newAgentReadiness(func() error {
+	coord.registerAgent(config.AgentCoder, broken, newAgentReadiness(func() error {
 		return buildErr
 	}))
 
@@ -198,7 +198,7 @@ func TestFailedAgentBuildDoesNotPoisonLaterRuns(t *testing.T) {
 	rebuilt, ready, err := coord.buildAgent(ctx, p, agentCfg, false)
 	require.NoError(t, err)
 	require.NoError(t, ready.wait(ctx), "the rebuilt agent's own setup must be clean")
-	coord.setActiveAgent(config.AgentCoder, rebuilt, ready)
+	coord.registerAgent(config.AgentCoder, rebuilt, ready)
 
 	// This run fails for unrelated reasons (unknown session, closed provider
 	// port); it must not fail on the previous agent's build error.

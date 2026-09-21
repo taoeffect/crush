@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/diff"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -28,6 +29,7 @@ type loadSessionMsg struct {
 	files         []SessionFile
 	readFiles     []string
 	sessionModels []session.SessionModel
+	messages      []message.Message
 }
 
 // lspFilePaths returns deduplicated file paths from both modified and read
@@ -93,11 +95,19 @@ func (m *UI) loadSession(sessionID string) tea.Cmd {
 			slog.Error("Failed to load session models", "session_id", sessionID, "error", err)
 		}
 
+		// Read the transcript here, not in Update: a long session is tens
+		// of megabytes and would freeze the event loop while it loads.
+		messages, err := m.com.Workspace.ListMessages(context.Background(), sessionID)
+		if err != nil {
+			return util.ReportError(err)
+		}
+
 		return loadSessionMsg{
 			session:       &session,
 			files:         sessionFiles,
 			readFiles:     readFiles,
 			sessionModels: sessionModels,
+			messages:      messages,
 		}
 	}
 	return tea.Batch(load, m.reportCurrentSession(sessionID))
