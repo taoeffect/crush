@@ -294,6 +294,21 @@ func TestSendMessageAcceptsStatusAccepted(t *testing.T) {
 	require.NoError(t, c.SendMessage(context.Background(), "ws1", proto.AgentMessage{SessionID: "sess1", Prompt: "hello"}))
 }
 
+func TestSendMessageIncludesChannelOrigin(t *testing.T) {
+	t.Parallel()
+
+	var got proto.AgentMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	c := captureClient(t, srv)
+	require.NoError(t, c.SendMessage(context.Background(), "ws1", proto.AgentMessage{SessionID: "sess1", Channel: "signal", Prompt: "hello"}))
+	require.Equal(t, "signal", got.Channel)
+}
+
 func TestSendMessageAcceptsStatusOK(t *testing.T) {
 	t.Parallel()
 

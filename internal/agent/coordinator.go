@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -404,12 +405,15 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	// keeps a prompt queued behind a busy session bound to the run that
 	// asked for it instead of to the turn that dequeues it.
 	lifetime := RunLifetimeFromContext(ctx)
+	channel := ChannelFromContext(ctx)
+	c.syncSessionChannel(ctx, sessionID, channel)
 	run := func() (*fantasy.AgentResult, error) {
 		return active.Run(ctx, SessionAgentCall{
 			SessionID:         sessionID,
 			RunID:             runID,
 			AutoApprove:       autoApprove,
 			NonInteractive:    nonInteractive,
+			Channel:           channel,
 			Prompt:            prompt,
 			HiddenUserMessage: message.HiddenUserMessage(ctx),
 			Attachments:       attachments,
@@ -536,6 +540,37 @@ func (c *coordinator) updateTools(ctx context.Context, agent SessionAgent, name 
 	}
 	agent.SetTools(tools)
 	return nil
+}
+
+// syncSessionChannel reconciles the session's persisted channel binding with
+// the origin of the turn about to run. A channel-originated turn (re)binds
+// the session to that channel — the newest push wins — and a local turn
+// clears a stale binding, since the session is no longer channel-driven once
+// the user takes it over directly. This is the binding's whole lifecycle:
+// it is only ever a reflection of the most recent turn's origin, and the
+// column is dropped with the session row when the session is deleted, so
+// there is no separate state to reap.
+//
+// Failures are logged and the turn proceeds: the binding is provenance for
+// reply routing, not a precondition for running.
+func (c *coordinator) syncSessionChannel(ctx context.Context, sessionID, channel string) {
+	sess, err := c.sessions.Get(ctx, sessionID)
+	if err != nil {
+		// A missing session is expected (it may be created later in the
+		// run), but a real database failure would otherwise be silent.
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("Failed to load session for channel binding sync",
+				"session", sessionID, "channel", channel, "error", err)
+		}
+		return
+	}
+	if sess.Channel == channel {
+		return
+	}
+	if _, err := c.sessions.SetChannel(ctx, sessionID, channel); err != nil {
+		slog.Warn("Failed to sync session channel binding",
+			"session", sessionID, "channel", channel, "error", err)
+	}
 }
 
 // effectiveReasoningEffort returns the reasoning effort to apply for provider calls.
@@ -967,6 +1002,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		IsYolo:               c.permissions.SkipRequests(),
 		Sessions:             c.sessions,
 		Messages:             c.messages,
+		Cfg:                  c.cfg,
 		Tools:                nil,
 		Notify:               c.notify,
 		RunComplete:          c.runComplete,

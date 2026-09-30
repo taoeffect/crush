@@ -36,6 +36,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteFileStmt, err = db.PrepareContext(ctx, deleteFile); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteFile: %w", err)
 	}
+	if q.deleteMCPDisabledServerStmt, err = db.PrepareContext(ctx, deleteMCPDisabledServer); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteMCPDisabledServer: %w", err)
+	}
+	if q.deleteMCPEnabledServerStmt, err = db.PrepareContext(ctx, deleteMCPEnabledServer); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteMCPEnabledServer: %w", err)
+	}
 	if q.deleteMessageStmt, err = db.PrepareContext(ctx, deleteMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteMessage: %w", err)
 	}
@@ -99,6 +105,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getUsageByModelStmt, err = db.PrepareContext(ctx, getUsageByModel); err != nil {
 		return nil, fmt.Errorf("error preparing query GetUsageByModel: %w", err)
 	}
+	if q.insertMCPDisabledServerStmt, err = db.PrepareContext(ctx, insertMCPDisabledServer); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertMCPDisabledServer: %w", err)
+	}
+	if q.insertMCPEnabledServerStmt, err = db.PrepareContext(ctx, insertMCPEnabledServer); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertMCPEnabledServer: %w", err)
+	}
 	if q.listAllUserMessagesStmt, err = db.PrepareContext(ctx, listAllUserMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAllUserMessages: %w", err)
 	}
@@ -113,6 +125,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listLatestSessionFilesStmt, err = db.PrepareContext(ctx, listLatestSessionFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListLatestSessionFiles: %w", err)
+	}
+	if q.listMCPDisabledServersStmt, err = db.PrepareContext(ctx, listMCPDisabledServers); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMCPDisabledServers: %w", err)
+	}
+	if q.listMCPEnabledServersStmt, err = db.PrepareContext(ctx, listMCPEnabledServers); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMCPEnabledServers: %w", err)
 	}
 	if q.listMessagesBySessionStmt, err = db.PrepareContext(ctx, listMessagesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMessagesBySession: %w", err)
@@ -140,6 +158,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.renameSessionStmt, err = db.PrepareContext(ctx, renameSession); err != nil {
 		return nil, fmt.Errorf("error preparing query RenameSession: %w", err)
+	}
+	if q.setSessionChannelStmt, err = db.PrepareContext(ctx, setSessionChannel); err != nil {
+		return nil, fmt.Errorf("error preparing query SetSessionChannel: %w", err)
 	}
 	if q.updateMessageStmt, err = db.PrepareContext(ctx, updateMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateMessage: %w", err)
@@ -176,6 +197,16 @@ func (q *Queries) Close() error {
 	if q.deleteFileStmt != nil {
 		if cerr := q.deleteFileStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteFileStmt: %w", cerr)
+		}
+	}
+	if q.deleteMCPDisabledServerStmt != nil {
+		if cerr := q.deleteMCPDisabledServerStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteMCPDisabledServerStmt: %w", cerr)
+		}
+	}
+	if q.deleteMCPEnabledServerStmt != nil {
+		if cerr := q.deleteMCPEnabledServerStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteMCPEnabledServerStmt: %w", cerr)
 		}
 	}
 	if q.deleteMessageStmt != nil {
@@ -283,6 +314,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getUsageByModelStmt: %w", cerr)
 		}
 	}
+	if q.insertMCPDisabledServerStmt != nil {
+		if cerr := q.insertMCPDisabledServerStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertMCPDisabledServerStmt: %w", cerr)
+		}
+	}
+	if q.insertMCPEnabledServerStmt != nil {
+		if cerr := q.insertMCPEnabledServerStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertMCPEnabledServerStmt: %w", cerr)
+		}
+	}
 	if q.listAllUserMessagesStmt != nil {
 		if cerr := q.listAllUserMessagesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listAllUserMessagesStmt: %w", cerr)
@@ -306,6 +347,16 @@ func (q *Queries) Close() error {
 	if q.listLatestSessionFilesStmt != nil {
 		if cerr := q.listLatestSessionFilesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listLatestSessionFilesStmt: %w", cerr)
+		}
+	}
+	if q.listMCPDisabledServersStmt != nil {
+		if cerr := q.listMCPDisabledServersStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMCPDisabledServersStmt: %w", cerr)
+		}
+	}
+	if q.listMCPEnabledServersStmt != nil {
+		if cerr := q.listMCPEnabledServersStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMCPEnabledServersStmt: %w", cerr)
 		}
 	}
 	if q.listMessagesBySessionStmt != nil {
@@ -351,6 +402,11 @@ func (q *Queries) Close() error {
 	if q.renameSessionStmt != nil {
 		if cerr := q.renameSessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing renameSessionStmt: %w", cerr)
+		}
+	}
+	if q.setSessionChannelStmt != nil {
+		if cerr := q.setSessionChannelStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing setSessionChannelStmt: %w", cerr)
 		}
 	}
 	if q.updateMessageStmt != nil {
@@ -416,6 +472,8 @@ type Queries struct {
 	createMessageStmt                    *sql.Stmt
 	createSessionStmt                    *sql.Stmt
 	deleteFileStmt                       *sql.Stmt
+	deleteMCPDisabledServerStmt          *sql.Stmt
+	deleteMCPEnabledServerStmt           *sql.Stmt
 	deleteMessageStmt                    *sql.Stmt
 	deleteSessionStmt                    *sql.Stmt
 	deleteSessionFilesStmt               *sql.Stmt
@@ -437,11 +495,15 @@ type Queries struct {
 	getUsageByDayOfWeekStmt              *sql.Stmt
 	getUsageByHourStmt                   *sql.Stmt
 	getUsageByModelStmt                  *sql.Stmt
+	insertMCPDisabledServerStmt          *sql.Stmt
+	insertMCPEnabledServerStmt           *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
 	listFilesByPathStmt                  *sql.Stmt
 	listFilesByPathAndSessionStmt        *sql.Stmt
 	listFilesBySessionStmt               *sql.Stmt
 	listLatestSessionFilesStmt           *sql.Stmt
+	listMCPDisabledServersStmt           *sql.Stmt
+	listMCPEnabledServersStmt            *sql.Stmt
 	listMessagesBySessionStmt            *sql.Stmt
 	listMessagesBySessionFromSummaryStmt *sql.Stmt
 	listNewFilesStmt                     *sql.Stmt
@@ -451,6 +513,7 @@ type Queries struct {
 	listUserMessagesBySessionStmt        *sql.Stmt
 	recordFileReadStmt                   *sql.Stmt
 	renameSessionStmt                    *sql.Stmt
+	setSessionChannelStmt                *sql.Stmt
 	updateMessageStmt                    *sql.Stmt
 	updateSessionStmt                    *sql.Stmt
 	updateSessionTitleAndUsageStmt       *sql.Stmt
@@ -465,6 +528,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		createMessageStmt:                    q.createMessageStmt,
 		createSessionStmt:                    q.createSessionStmt,
 		deleteFileStmt:                       q.deleteFileStmt,
+		deleteMCPDisabledServerStmt:          q.deleteMCPDisabledServerStmt,
+		deleteMCPEnabledServerStmt:           q.deleteMCPEnabledServerStmt,
 		deleteMessageStmt:                    q.deleteMessageStmt,
 		deleteSessionStmt:                    q.deleteSessionStmt,
 		deleteSessionFilesStmt:               q.deleteSessionFilesStmt,
@@ -486,11 +551,15 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getUsageByDayOfWeekStmt:              q.getUsageByDayOfWeekStmt,
 		getUsageByHourStmt:                   q.getUsageByHourStmt,
 		getUsageByModelStmt:                  q.getUsageByModelStmt,
+		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
+		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
 		listFilesByPathStmt:                  q.listFilesByPathStmt,
 		listFilesByPathAndSessionStmt:        q.listFilesByPathAndSessionStmt,
 		listFilesBySessionStmt:               q.listFilesBySessionStmt,
 		listLatestSessionFilesStmt:           q.listLatestSessionFilesStmt,
+		listMCPDisabledServersStmt:           q.listMCPDisabledServersStmt,
+		listMCPEnabledServersStmt:            q.listMCPEnabledServersStmt,
 		listMessagesBySessionStmt:            q.listMessagesBySessionStmt,
 		listMessagesBySessionFromSummaryStmt: q.listMessagesBySessionFromSummaryStmt,
 		listNewFilesStmt:                     q.listNewFilesStmt,
@@ -500,6 +569,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listUserMessagesBySessionStmt:        q.listUserMessagesBySessionStmt,
 		recordFileReadStmt:                   q.recordFileReadStmt,
 		renameSessionStmt:                    q.renameSessionStmt,
+		setSessionChannelStmt:                q.setSessionChannelStmt,
 		updateMessageStmt:                    q.updateMessageStmt,
 		updateSessionStmt:                    q.updateSessionStmt,
 		updateSessionTitleAndUsageStmt:       q.updateSessionTitleAndUsageStmt,

@@ -487,7 +487,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	}
 	// Only show toggle compact mode command if window width is larger than compact breakpoint (120)
 	if c.windowWidth >= sidebarCompactModeBreakpoint && c.hasSession {
-		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_sidebar", "Toggle Sidebar", "", ActionToggleCompactMode{}))
+		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_sidebar", "Toggle Sidebar", "ctrl+b", ActionToggleCompactMode{}))
 	}
 
 	commands = append(commands, NewCommandItem(c.com.Styles, "select_compaction", "Select Compaction Method", "", ActionOpenDialog{
@@ -522,6 +522,13 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	// Add disable Docker MCP command if it's currently enabled
 	if cfg.IsDockerMCPEnabled() {
 		commands = append(commands, NewCommandItem(c.com.Styles, "disable_docker_mcp", "Disable Docker MCP Catalog", "", ActionDisableDockerMCP{}))
+	}
+
+	// Toggle MCP servers for this repository when any are configured.
+	if len(cfg.MCP) > 0 {
+		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_mcps", "Toggle MCPs", "", ActionOpenDialog{
+			DialogID: MCPTogglesID,
+		}))
 	}
 
 	if c.hasTodos || c.hasQueue {

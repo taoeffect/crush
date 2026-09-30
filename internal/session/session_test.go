@@ -221,6 +221,53 @@ func TestEstimatedUsageStateSurvivesFetchModifySave(t *testing.T) {
 	require.True(t, refetched.EstimatedUsage)
 }
 
+func TestSessionChannelPersists(t *testing.T) {
+	t.Parallel()
+	sessions := newTestService(t)
+
+	created, err := sessions.Create(t.Context(), "channel")
+	require.NoError(t, err)
+	updated, err := sessions.SetChannel(t.Context(), created.ID, "signal")
+	require.NoError(t, err)
+	require.Equal(t, "signal", updated.Channel)
+
+	fetched, err := sessions.Get(t.Context(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "signal", fetched.Channel)
+}
+
+func TestMCPServerDisabledRoundTrip(t *testing.T) {
+	sessions := newTestService(t)
+
+	disabled, err := sessions.MCPDisabledServers(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, disabled, "a new repository must default to the config")
+
+	require.NoError(t, sessions.SetMCPServerDisabled(t.Context(), "docker", true))
+	require.NoError(t, sessions.SetMCPServerDisabled(t.Context(), "serena", true))
+	require.NoError(t, sessions.SetMCPServerDisabled(t.Context(), "docker", true), "disabling twice must be idempotent")
+
+	disabled, err = sessions.MCPDisabledServers(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{"docker", "serena"}, disabled)
+
+	require.NoError(t, sessions.SetMCPServerDisabled(t.Context(), "docker", false))
+	disabled, err = sessions.MCPDisabledServers(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{"serena"}, disabled)
+
+	// Enabling records an enabled override so a config-disabled server
+	// stays enabled across restarts; disabling removes it again.
+	enabled, err := sessions.MCPServersEnabled(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{"docker"}, enabled)
+
+	require.NoError(t, sessions.SetMCPServerDisabled(t.Context(), "docker", true))
+	enabled, err = sessions.MCPServersEnabled(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, enabled)
+}
+
 func TestEstimatedUsageStateCanBeClearedByExplicitSave(t *testing.T) {
 	sessions := newTestService(t)
 
