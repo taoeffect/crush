@@ -255,10 +255,12 @@ func TestLiveProviderSync_GetStoreFailureStillUsesMergedResult(t *testing.T) {
 
 	seed := testLiveSeedProvider()
 	started := make(chan struct{})
+	release := make(chan struct{})
 	callbackCh := make(chan catwalk.Provider, 1)
 	client := &mockLiveProviderClient{
 		provider: catwalk.Provider{Models: []catwalk.Model{{ID: "live-model", Name: "Live Model"}}},
 		started:  started,
+		release:  release,
 	}
 	syncer := &liveProviderSync{}
 	syncer.Init(client, path, true, seed, true)
@@ -270,6 +272,7 @@ func TestLiveProviderSync_GetStoreFailureStillUsesMergedResult(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, seed, provider)
 	<-started
+	close(release)
 	require.Eventually(t, func() bool {
 		provider, err := syncer.Get(t.Context())
 		return err == nil && len(provider.Models) == 1 && provider.Models[0].ID == "live-model"
