@@ -189,7 +189,7 @@ jobs:
             body: JSON.stringify({
               model,
               temperature: 0.2,
-              max_tokens: 2000,
+              max_tokens: 16000,
               messages: [
                 {
                   role: "system",
@@ -208,7 +208,14 @@ jobs:
           }
 
           const payload = await response.json();
-          const notes = (payload.choices?.[0]?.message?.content ?? "")
+          const choice = payload.choices?.[0];
+          // GLM spends completion tokens on hidden reasoning first. A response cut
+          // off by max_tokens has empty content, which looks like the deliberate
+          // empty answer the prompt allows, so require a normal stop.
+          if (choice?.finish_reason !== "stop") {
+            throw new Error(`Z.ai release notes response ended with finish_reason ${choice?.finish_reason ?? "(none)"}, usage: ${JSON.stringify(payload.usage)}`);
+          }
+          const notes = (choice.message?.content ?? "")
             .replace(/^```(?:markdown)?\s*/i, "")
             .replace(/\s*```$/i, "")
             .trim();
