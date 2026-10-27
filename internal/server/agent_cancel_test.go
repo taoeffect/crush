@@ -417,3 +417,7 @@ func TestPostAgentRunCancel_EndsTheRun(t *testing.T) {
 		"cancelling an unknown run must succeed")
 	require.Equal(t, http.StatusNotFound, postRunCancel(t, c, "nope", runID).Code)
 }
+
+func (*runCoordinator) ListSettledMessages(context.Context, string) ([]message.Message, error) {
+	return nil, nil
+}

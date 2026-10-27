@@ -66,7 +66,7 @@ func TestBuildToolsNewSessionRegistration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := testEnv(t)
-			cfg, err := config.Init(env.workingDir, "", false)
+			cfg, err := config.Init(t.Context(), env.workingDir, "", false)
 			require.NoError(t, err)
 			cfg.Config().Options.CompactionMethod = tc.method
 			cfg.Config().Options.DisableAutoSummarize = tc.disableAutoSummarize

@@ -107,8 +107,10 @@ func (g *streamGate) let() { close(g.release) }
 func lifetimeTestAgent(env fakeEnv, large fantasy.LanguageModel, broker *pubsub.Broker[notify.RunComplete]) *sessionAgent {
 	window := catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}
 	return NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: large, CatwalkCfg: window},
-		SmallModel:  Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: window},
+		Models: fixedModels(
+			Model{Model: large, CatwalkCfg: window},
+			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: window},
+		),
 		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,

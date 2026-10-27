@@ -210,9 +210,12 @@ func (w *ClientWorkspace) ParseAgentToolSessionID(sessionID string) (string, str
 }
 
 // SetCurrentSession reports the session this client is currently
-// viewing to the server. Empty sessionID clears the entry. Errors
-// are propagated to the caller; the TUI logs and ignores them since
-// the presence record is a hint, not correctness-critical state.
+// viewing to the server. Empty sessionID clears the entry. The report
+// scopes the client's event stream: permission and question prompts
+// are only delivered to clients viewing the session that raised them.
+// Errors are propagated to the caller; the TUI logs and ignores them
+// since the presence record is best-effort, not correctness-critical
+// state.
 func (w *ClientWorkspace) SetCurrentSession(ctx context.Context, sessionID string) error {
 	// Resolve the title so herdr's pane metadata reflects the
 	// session immediately: no session event fires on a plain
@@ -740,9 +743,19 @@ func (w *ClientWorkspace) ReadSkill(ctx context.Context, skillID string) ([]byte
 
 // -- MCP operations --
 
+// mcpStatesTimeout bounds a single MCP state probe. The client SDK sets no
+// request timeout of its own, and the UI serializes refreshes behind an
+// in-flight flag: without a deadline a hung request would wedge that flag
+// forever, queueing every later refresh behind it and silently freezing the
+// MCP sidebar. A var, not a const, so tests can shrink it.
+var mcpStatesTimeout = 10 * time.Second
+
 func (w *ClientWorkspace) MCPGetStates() map[string]mcp.ClientInfo {
-	states, err := w.client.MCPGetStates(context.Background(), w.workspaceID())
+	ctx, cancel := context.WithTimeout(context.Background(), mcpStatesTimeout)
+	defer cancel()
+	states, err := w.client.MCPGetStates(ctx, w.workspaceID())
 	if err != nil {
+		slog.Warn("Failed to fetch MCP states", "error", err)
 		return nil
 	}
 	result := make(map[string]mcp.ClientInfo, len(states))
@@ -1242,9 +1255,11 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 		return pubsub.Event[permission.PermissionNotification]{
 			Type: e.Type,
 			Payload: permission.PermissionNotification{
+				SessionID:  e.Payload.SessionID,
 				ToolCallID: e.Payload.ToolCallID,
 				Granted:    e.Payload.Granted,
 				Denied:     e.Payload.Denied,
+				Cancelled:  e.Payload.Cancelled,
 			},
 		}
 	case pubsub.Event[proto.QuestionRequest]:

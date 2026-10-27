@@ -28,8 +28,10 @@ func handoffAgent(t *testing.T, env fakeEnv, large fantasy.LanguageModel, tools 
 	t.Cleanup(broker.Shutdown)
 	window := catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: large, CatwalkCfg: window},
-		SmallModel:  Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: window},
+		Models: fixedModels(
+			Model{Model: large, CatwalkCfg: window},
+			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: window},
+		),
 		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,

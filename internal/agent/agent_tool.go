@@ -60,7 +60,7 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 
 			// The delegated turn runs on the models of the run that
 			// asked for it, rebuilt with sub-agent provider settings.
-			models, err := c.subAgentModels(ctx)
+			models, err := c.subAgentRunModels(ctx)
 			if err != nil {
 				return fantasy.ToolResponse{}, err
 			}

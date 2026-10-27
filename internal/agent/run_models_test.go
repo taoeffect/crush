@@ -8,6 +8,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -148,21 +149,32 @@ func TestRun_ModelChangeDuringTurnDoesNotAffectIt(t *testing.T) {
 
 	// The tool runs between the turn's two steps, which is exactly when
 	// a workspace model change would land.
-	var sa *sessionAgent
 	poison := &poisonModel{t: t}
+	workspaceModels := csync.NewValue(ModelSet{
+		Large: testModel(poison, "test-provider", "test-large"),
+		Small: testModel(poison, "test-provider", "test-small"),
+	})
 	swap := fantasy.NewAgentTool(
 		"echo",
 		"Echoes its input back.",
 		func(_ context.Context, params echoToolParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			sa.SetModels(
-				testModel(poison, "other-provider", "other-model"),
-				testModel(poison, "other-provider", "other-model-small"),
-			)
+			workspaceModels.Set(ModelSet{
+				Large: testModel(poison, "other-provider", "other-model"),
+				Small: testModel(poison, "other-provider", "other-model-small"),
+			})
 			return fantasy.NewTextResponse("echoed: " + params.Value), nil
 		},
 	)
 
-	sa = testSessionAgent(env, poison, poison, "system", swap).(*sessionAgent)
+	sa := NewSessionAgent(SessionAgentOptions{
+		Models:               workspaceModels.Get,
+		SystemPrompt:         "system",
+		DisableContextStatus: true,
+		IsYolo:               true,
+		Sessions:             env.sessions,
+		Messages:             env.messages,
+		Tools:                []fantasy.AgentTool{swap},
+	})
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -234,7 +246,7 @@ func TestRunSelection(t *testing.T) {
 	newCoordinator := func(t *testing.T) *coordinator {
 		t.Helper()
 		env := testEnv(t)
-		cfg, err := config.Init(env.workingDir, "", false)
+		cfg, err := config.Init(t.Context(), env.workingDir, "", false)
 		require.NoError(t, err)
 		cfg.OverridePreferredModel(config.SelectedModelTypeLarge, configured.Large)
 		cfg.OverridePreferredModel(config.SelectedModelTypeSmall, configured.Small)

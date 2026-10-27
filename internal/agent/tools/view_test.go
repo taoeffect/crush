@@ -228,6 +228,10 @@ func (m *mockViewPermissionService) AutoApproveSession(sessionID string) {}
 
 func (m *mockViewPermissionService) RevokeAutoApproveSession(sessionID string) {}
 
+func (m *mockViewPermissionService) PendingRequests() []permission.PermissionRequest {
+	return nil
+}
+
 func (m *mockViewPermissionService) SetSkipRequests(skip bool) {}
 
 func (m *mockViewPermissionService) SkipRequests() bool {

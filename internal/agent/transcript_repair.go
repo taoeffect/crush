@@ -55,7 +55,10 @@ func RepairInterruptedSession(ctx context.Context, messages message.Service, ses
 		if msg.IsFinished() {
 			continue
 		}
-		msg.AddFinish(message.FinishReasonError, interruptedTurnTitle, interruptedTurnDetails)
+		// Backdated to the message's last write: response-time statistics
+		// average finished_at - created_at, so stamping now would count a
+		// turn repaired months later as months long.
+		msg.AddFinishAt(message.FinishReasonError, interruptedTurnTitle, interruptedTurnDetails, msg.UpdatedAt)
 		if err := messages.Update(ctx, *msg); err != nil {
 			return err
 		}

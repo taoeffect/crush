@@ -63,10 +63,12 @@ func TestRun_NonInteractiveTurnWithholdsInteractiveTools(t *testing.T) {
 
 			model := &toolPaletteModel{names: make(chan []string, 1)}
 			sa := NewSessionAgent(SessionAgentOptions{
-				LargeModel: Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-				SmallModel: Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-				Sessions:   env.sessions,
-				Messages:   env.messages,
+				Models: fixedModels(
+					Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+					Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+				),
+				Sessions: env.sessions,
+				Messages: env.messages,
 				Tools: []fantasy.AgentTool{
 					tools.NewQuestionTool(question.NewService()),
 					tools.NewNewSessionTool(true, true),

@@ -84,8 +84,10 @@ func TestRun_UsesTheTurnsOwnPromptAndPrefix(t *testing.T) {
 	// provider. Nothing of it may reach a turn that pinned its own.
 	workspace := &poisonModel{t: t}
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:   modelWithPrefix(workspace, "workspace-provider", "workspace-model", "WORKSPACE-PREFIX"),
-		SmallModel:   modelWithPrefix(workspace, "workspace-provider", "workspace-model", "WORKSPACE-PREFIX"),
+		Models: fixedModels(
+			modelWithPrefix(workspace, "workspace-provider", "workspace-model", "WORKSPACE-PREFIX"),
+			modelWithPrefix(workspace, "workspace-provider", "workspace-model", "WORKSPACE-PREFIX"),
+		),
 		SystemPrompt: "workspace system prompt",
 		IsYolo:       true,
 		Sessions:     env.sessions,
@@ -127,8 +129,10 @@ func TestGenerateTitle_UsesTheAttemptedModelsPrefix(t *testing.T) {
 	env := testEnv(t)
 
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:   modelWithPrefix(&finishStreamModel{text: "done"}, "large-provider", "large-model", "LARGE-PREFIX"),
-		SmallModel:   modelWithPrefix(&finishStreamModel{text: "a title"}, "small-provider", "small-model", "SMALL-PREFIX"),
+		Models: fixedModels(
+			modelWithPrefix(&finishStreamModel{text: "done"}, "large-provider", "large-model", "LARGE-PREFIX"),
+			modelWithPrefix(&finishStreamModel{text: "a title"}, "small-provider", "small-model", "SMALL-PREFIX"),
+		),
 		SystemPrompt: "system prompt",
 		IsYolo:       true,
 		Sessions:     env.sessions,
@@ -273,7 +277,7 @@ func TestAgentTool_DelegatedTurnUsesTheInheritedModelsPrompt(t *testing.T) {
 }`, baseURL+"/v1")
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "crush.json"), []byte(crushJSON), 0o644))
 
-	cfg, err := config.Init(env.workingDir, "", false)
+	cfg, err := config.Init(t.Context(), env.workingDir, "", false)
 	require.NoError(t, err)
 	cfg.SetupAgents()
 
@@ -347,7 +351,7 @@ func TestBuildModels_StampsEachProvidersPrefix(t *testing.T) {
 }`
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "crush.json"), []byte(crushJSON), 0o644))
 
-	cfg, err := config.Init(env.workingDir, "", false)
+	cfg, err := config.Init(t.Context(), env.workingDir, "", false)
 	require.NoError(t, err)
 
 	coord := &coordinator{cfg: cfg, sessions: env.sessions, messages: env.messages}

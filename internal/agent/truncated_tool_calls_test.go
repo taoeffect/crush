@@ -391,8 +391,10 @@ func TestRun_TruncatedTurnStillRunsQueuedPrompt(t *testing.T) {
 		},
 	}
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		SmallModel:  Model{Model: &finishStreamModel{text: "a title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		Models: fixedModels(
+			Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+			Model{Model: &finishStreamModel{text: "a title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		),
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		Tools:       []fantasy.AgentTool{tool},

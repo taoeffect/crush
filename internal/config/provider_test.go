@@ -238,6 +238,10 @@ func TestProviders_Integration_LiveOverlayRefreshesWithCredentialsInBackground(t
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
+	// TestMain sets CRUSH_GLOBAL_DATA for the whole package, and
+	// cachePathFor prefers it over XDG_DATA_HOME. The cache tests in this
+	// file override it too, or they share one cache and leak into each other.
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
 
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -354,6 +358,7 @@ func TestProviders_Integration_LiveOverlayUpdatesProviderListAndPublishesEvent(t
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -435,6 +440,7 @@ func TestProviders_Integration_LiveOverlaySkipsWithoutCredentials(t *testing.T) 
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
 
 	seed := catwalk.Provider{
 		Name:        "Venice",
@@ -477,6 +483,7 @@ func TestUpdateVenice_LiveSourceStoresCache(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/models", r.URL.Path)
@@ -531,6 +538,7 @@ func TestUpdateVenice_LiveSourceRequiresCredentials(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
 
 	seed := catwalk.Provider{ID: catwalk.InferenceProviderVenice, Name: "Venice"}
 	require.NoError(t, newCache[[]catwalk.Provider](cachePathFor("providers")).Store([]catwalk.Provider{seed}))
@@ -547,6 +555,7 @@ func TestUpdateCopilot_FileSourceStoresCache(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
 
 	provider := catwalk.Provider{
 		Name: "Copilot",

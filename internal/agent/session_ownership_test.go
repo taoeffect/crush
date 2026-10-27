@@ -16,11 +16,13 @@ import (
 func sharedOwnershipAgent(t *testing.T, env fakeEnv, own *sessionOwnership, large fantasy.LanguageModel) *sessionAgent {
 	t.Helper()
 	return NewSessionAgent(SessionAgentOptions{
-		LargeModel: Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		SmallModel: Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		Sessions:   env.sessions,
-		Messages:   env.messages,
-		Ownership:  own,
+		Models: fixedModels(
+			Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		),
+		Sessions:  env.sessions,
+		Messages:  env.messages,
+		Ownership: own,
 	}).(*sessionAgent)
 }
 

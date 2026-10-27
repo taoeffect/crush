@@ -99,7 +99,7 @@ func loadPromptTestConfig(t *testing.T, workingDir, options string) *config.Conf
 	content := `{"providers":{"test":{"type":"openai-compat","base_url":"http://localhost:1/v1","models":[{"id":"test-model","name":"Test Model"}]}},"models":{"large":{"provider":"test","model":"test-model"},"small":{"provider":"test","model":"test-model"}},"options":{` + strings.Join(optionFields, ",") + `}}`
 	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "crush.json"), []byte(content), 0o644))
 
-	store, err := config.Load(workingDir, filepath.Join(workingDir, ".crush"), false)
+	store, err := config.Load(t.Context(), workingDir, filepath.Join(workingDir, ".crush"), false)
 	require.NoError(t, err)
 	return store
 }

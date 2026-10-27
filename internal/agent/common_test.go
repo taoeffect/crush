@@ -75,7 +75,7 @@ func testEnv(t *testing.T) fakeEnv {
 	sessions := session.NewService(q, conn)
 	messages := message.NewService(q)
 
-	permissions := permission.NewPermissionService(workingDir, true, []string{})
+	permissions := permission.NewPermissionService(workingDir, true, []string{}, nil)
 	history := history.NewService(q, conn)
 	filetrackerService := filetracker.NewService(q)
 	lspClients := csync.NewMap[string, *lsp.Client]()
@@ -120,8 +120,7 @@ func testSessionAgent(env fakeEnv, large, small fantasy.LanguageModel, systemPro
 		},
 	}
 	agent := NewSessionAgent(SessionAgentOptions{
-		LargeModel:           largeModel,
-		SmallModel:           smallModel,
+		Models:               fixedModels(largeModel, smallModel),
 		SystemPrompt:         systemPrompt,
 		DisableContextStatus: true,
 		IsYolo:               true,
@@ -145,7 +144,7 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := config.Init(env.workingDir, "", false)
+	cfg, err := config.Init(context.Background(), env.workingDir, "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +175,7 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	}
 
 	allTools := []fantasy.AgentTool{
-		tools.NewBashTool(env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName),
+		tools.NewBashTool(env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName, cfg.Config().Options.GetMaxBackgroundJobs()),
 		tools.NewDownloadTool(env.permissions, env.workingDir, r.GetDefaultClient()),
 		tools.NewEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
@@ -213,3 +212,11 @@ func main() {
 	err = os.WriteFile(dir+"/main.go", []byte(mainGo), 0o644)
 	require.NoError(t, err)
 }
+
+// fixedModels returns a model source that always hands out the same pair.
+func fixedModels(large, small Model) func() ModelSet {
+	return func() ModelSet { return ModelSet{Large: large, Small: small} }
+}
+
+// noModels is the model source for tests that never reach a provider.
+func noModels() ModelSet { return ModelSet{} }

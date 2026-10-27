@@ -54,8 +54,10 @@ func newAskingTool(t *testing.T, perms permission.Service, sessionID string, ver
 func autoApproveAgent(t *testing.T, env fakeEnv, perms permission.Service, large fantasy.LanguageModel, tools ...fantasy.AgentTool) *sessionAgent {
 	t.Helper()
 	return NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		SmallModel:  Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		Models: fixedModels(
+			Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		),
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		Tools:       tools,
@@ -149,7 +151,7 @@ func (m *gatedToolStreamModel) StreamObject(context.Context, fantasy.ObjectCall)
 func TestRun_AutoApproveHoldLastsExactlyTheTurn(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil)
+	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -189,7 +191,7 @@ func TestRun_AutoApproveHoldLastsExactlyTheTurn(t *testing.T) {
 func TestRun_WithoutAutoApproveStillPrompts(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil)
+	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -220,7 +222,7 @@ func TestRun_WithoutAutoApproveStillPrompts(t *testing.T) {
 func TestRun_QueuedPromptTakesItsOwnHold(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil)
+	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -286,7 +288,7 @@ func TestRun_QueuedPromptTakesItsOwnHold(t *testing.T) {
 func TestRun_QueuedPromptDoesNotInheritTheHold(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil)
+	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -349,7 +351,7 @@ func TestRun_QueuedPromptDoesNotInheritTheHold(t *testing.T) {
 func TestRun_CancelledTurnReleasesTheHold(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil)
+	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)

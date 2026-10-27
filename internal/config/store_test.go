@@ -236,7 +236,7 @@ func TestLoad_UsesGlobalModelsWithoutWorkspaceConfig(t *testing.T) {
 		"small": map[string]any{"provider": "test-provider", "model": "global-small"},
 	}, nil))
 
-	store, err := Load(dir, workspaceDir, false)
+	store, err := Load(t.Context(), dir, workspaceDir, false)
 	require.NoError(t, err)
 	require.Equal(t, workspacePath, store.workspacePath)
 	require.NoFileExists(t, workspacePath)
@@ -265,7 +265,7 @@ func TestLoad_WorkspaceModelsOverrideGlobalModels(t *testing.T) {
 		},
 	})
 
-	store, err := Load(dir, workspaceDir, false)
+	store, err := Load(t.Context(), dir, workspaceDir, false)
 	require.NoError(t, err)
 	require.Equal(t, "workspace-large", store.config.Models[SelectedModelTypeLarge].Model)
 	require.Equal(t, "workspace-small", store.config.Models[SelectedModelTypeSmall].Model)
@@ -291,7 +291,7 @@ func TestLoad_PartialWorkspaceModelOverrideFallsBackToGlobal(t *testing.T) {
 		},
 	})
 
-	store, err := Load(dir, workspaceDir, false)
+	store, err := Load(t.Context(), dir, workspaceDir, false)
 	require.NoError(t, err)
 	require.Equal(t, "workspace-large", store.config.Models[SelectedModelTypeLarge].Model)
 	require.Equal(t, "global-small", store.config.Models[SelectedModelTypeSmall].Model)
@@ -320,11 +320,34 @@ func TestLoad_WorkspaceRecentModelsOverrideGlobalRecentModels(t *testing.T) {
 		},
 	})
 
-	store, err := Load(dir, workspaceDir, false)
+	store, err := Load(t.Context(), dir, workspaceDir, false)
 	require.NoError(t, err)
 	require.Len(t, store.config.RecentModels[SelectedModelTypeLarge], 1)
 	require.Equal(t, "workspace-large", store.config.RecentModels[SelectedModelTypeLarge][0].Model)
 	require.Equal(t, "global-small", store.config.RecentModels[SelectedModelTypeSmall][0].Model)
+}
+
+func TestLoad_InvalidWorkspaceConfigIsFatal(t *testing.T) {
+	isolateProviderStateForTest(t)
+
+	dir := t.TempDir()
+	globalDataDir := filepath.Join(dir, "global-data")
+	t.Setenv("CRUSH_GLOBAL_DATA", globalDataDir)
+
+	workspaceDir := filepath.Join(dir, ".crush")
+	workspacePath := filepath.Join(workspaceDir, "crush.json")
+	writeJSONFile(t, filepath.Join(globalDataDir, "crush.json"), modelSelectionTestConfig(map[string]any{
+		"large": map[string]any{"provider": "test-provider", "model": "global-large"},
+		"small": map[string]any{"provider": "test-provider", "model": "global-small"},
+	}, nil))
+	require.NoError(t, os.MkdirAll(workspaceDir, 0o755))
+	require.NoError(t, os.WriteFile(workspacePath, []byte(`{"models": {`), 0o600))
+
+	store, err := Load(t.Context(), dir, workspaceDir, false)
+	require.Error(t, err)
+	require.Nil(t, store)
+	require.Contains(t, err.Error(), "invalid JSON in config file")
+	require.Contains(t, err.Error(), workspacePath)
 }
 
 // TestReloadFromDisk_WorkspaceRecentModelsOverrideGlobalRecentModels is a
@@ -355,7 +378,7 @@ func TestReloadFromDisk_WorkspaceRecentModelsOverrideGlobalRecentModels(t *testi
 		},
 	})
 
-	store, err := Load(dir, workspaceDir, false)
+	store, err := Load(t.Context(), dir, workspaceDir, false)
 	require.NoError(t, err)
 	require.Len(t, store.config.RecentModels[SelectedModelTypeLarge], 1)
 	require.Equal(t, "workspace-large", store.config.RecentModels[SelectedModelTypeLarge][0].Model)
@@ -556,7 +579,7 @@ func TestReloadFromDisk_UsesNewConfigValues(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(initialConfig), 0o600))
 
 	// Load initial config properly
-	store, err := Load(dir, dir, false)
+	store, err := Load(t.Context(), dir, dir, false)
 	require.NoError(t, err)
 
 	// Set globalDataPath for the test (Load doesn't set this directly)
@@ -609,7 +632,7 @@ func TestSetConfigField_AutoReloads(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(initialConfig), 0o600))
 
 	// Load initial config
-	store, err := Load(dir, dir, false)
+	store, err := Load(t.Context(), dir, dir, false)
 	require.NoError(t, err)
 
 	// Verify initial state
@@ -644,7 +667,7 @@ func TestRemoveConfigField_AutoReloads(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(initialConfig), 0o600))
 
 	// Load initial config
-	store, err := Load(dir, dir, false)
+	store, err := Load(t.Context(), dir, dir, false)
 	require.NoError(t, err)
 
 	// Set globalDataPath and capture snapshot
@@ -691,7 +714,9 @@ func TestSetConfigField_AutoReloadSkipsWhenNoWorkingDir(t *testing.T) {
 // TestAutoReloadDisabledDuringReload verifies that auto-reload is suppressed
 // during ReloadFromDisk to prevent re-entrant/nested reload calls.
 func TestAutoReloadDisabledDuringReload(t *testing.T) {
-	t.Parallel()
+	// Load rewrites the global config; keep it off the one other tests share.
+	t.Setenv("CRUSH_GLOBAL_CONFIG", t.TempDir())
+	t.Setenv("CRUSH_GLOBAL_DATA", t.TempDir())
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "crush.json")
@@ -710,7 +735,7 @@ func TestAutoReloadDisabledDuringReload(t *testing.T) {
 
 	// Load will trigger configureProviders which removes anthropic OAuth config.
 	// This should NOT cause infinite recursion — writeMu prevents re-entrant reloads.
-	store, err := Load(dir, dir, false)
+	store, err := Load(t.Context(), dir, dir, false)
 	require.NoError(t, err)
 
 	// Capture snapshot and verify reload also works without recursion
@@ -739,7 +764,7 @@ func TestSetConfigFields_AutoReloadsAtomically(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte(initialConfig), 0o600))
 
 	// Load initial config.
-	store, err := Load(dir, dir, false)
+	store, err := Load(t.Context(), dir, dir, false)
 	require.NoError(t, err)
 
 	// Set globalDataPath and capture snapshot.
@@ -1036,7 +1061,7 @@ func TestConfigStore_ReloadAfterWorkspaceModelWrite(t *testing.T) {
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "crush.json"), []byte(initialConfig), 0o600))
 
-	store, err := Load(dir, filepath.Join(dir, ".crush"), false)
+	store, err := Load(t.Context(), dir, filepath.Join(dir, ".crush"), false)
 	require.NoError(t, err)
 	require.Equal(t, workspacePath, store.workspacePath)
 	require.Equal(t, "gpt-4", store.config.Models[SelectedModelTypeLarge].Model)

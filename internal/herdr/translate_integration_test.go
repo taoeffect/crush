@@ -239,7 +239,7 @@ func TestPermissionRequestPublishOrderIntegration(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
-	svc := permission.NewPermissionService(dir, false, nil)
+	svc := permission.NewPermissionService(dir, false, nil, nil)
 	requests := svc.Subscribe(ctx)
 	notifications := svc.SubscribeNotifications(ctx)
 

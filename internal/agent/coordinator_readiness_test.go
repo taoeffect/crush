@@ -40,7 +40,7 @@ func TestBuildAgentReadinessSurvivesCallerCancellation(t *testing.T) {
 	env := testEnv(t)
 
 	// Minimal hermetic config: one openai-typed provider with selected large
-	// and small models so buildAgentModels and the system-prompt build both
+	// and small models so the model build and the system-prompt build both
 	// succeed. No MCP servers are configured, so initialization would complete
 	// instantly if we let it — we arm the gate anyway to prove the readiness
 	// goroutines no longer block on it.
@@ -54,7 +54,7 @@ func TestBuildAgentReadinessSurvivesCallerCancellation(t *testing.T) {
 }`
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "crush.json"), []byte(crushJSON), 0o644))
 
-	cfg, err := config.Init(env.workingDir, "", false)
+	cfg, err := config.Init(t.Context(), env.workingDir, "", false)
 	require.NoError(t, err)
 	cfg.SetupAgents()
 

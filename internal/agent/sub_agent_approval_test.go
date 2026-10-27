@@ -72,7 +72,7 @@ func oneToolCallScript(callID, toolName string) []scriptedStep {
 func TestRun_SubAgentTurnInheritsTheRunsApproval(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil)
+	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
 
 	parentSess, err := env.sessions.Create(t.Context(), "parent")
 	require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestRun_SubAgentTurnInheritsTheRunsApproval(t *testing.T) {
 func TestRun_SubAgentTurnOfAnOrdinaryRunStillPrompts(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil)
+	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
 
 	parentSess, err := env.sessions.Create(t.Context(), "parent")
 	require.NoError(t, err)
@@ -148,7 +148,7 @@ func TestRun_SubAgentTurnOfAnOrdinaryRunStillPrompts(t *testing.T) {
 func TestRun_ToolCallsSeeTheirOwnTurnsApproval(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil)
+	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)

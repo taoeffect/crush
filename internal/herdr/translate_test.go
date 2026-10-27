@@ -201,6 +201,13 @@ func TestTranslateDomainPermissionNotification(t *testing.T) {
 	}
 	assert.Equal(t, PermissionResolved{ToolCallID: "tc-1"}, Translate(denied))
 
+	// A prompt abandoned by a cancelled turn is resolved too;
+	// otherwise the pane stays blocked after the dialog closes.
+	cancelled := pubsub.Event[permission.PermissionNotification]{
+		Payload: permission.PermissionNotification{ToolCallID: "tc-1", Cancelled: true},
+	}
+	assert.Equal(t, PermissionResolved{ToolCallID: "tc-1"}, Translate(cancelled))
+
 	// The permission service publishes a flagless notification when
 	// a request starts, before publishing the request itself. It is
 	// not a resolution and must not unblock the pane.
@@ -440,6 +447,11 @@ func TestTranslateProtoPermissionNotification(t *testing.T) {
 		Payload: proto.PermissionNotification{ToolCallID: "tc-1", Granted: true},
 	}
 	assert.Equal(t, PermissionResolved{ToolCallID: "tc-1"}, Translate(granted))
+
+	cancelled := pubsub.Event[proto.PermissionNotification]{
+		Payload: proto.PermissionNotification{ToolCallID: "tc-1", Cancelled: true},
+	}
+	assert.Equal(t, PermissionResolved{ToolCallID: "tc-1"}, Translate(cancelled))
 
 	// The server forwards the permission service's flagless
 	// request marker too; it is not a resolution on the wire

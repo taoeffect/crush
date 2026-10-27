@@ -133,7 +133,7 @@ func loadUpdateProvidersConfig(cmd *cobra.Command) (*config.Config, error) {
 		}
 	}()
 
-	store, err := config.Load(cwd, dataDir, debug)
+	store, err := config.Load(cmd.Context(), cwd, dataDir, debug)
 	if err != nil {
 		return nil, err
 	}

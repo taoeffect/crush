@@ -3,7 +3,6 @@ package backend
 import (
 	"context"
 
-	"github.com/charmbracelet/crush/internal/agent"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
@@ -18,7 +17,7 @@ func (b *Backend) CreateSession(ctx context.Context, workspaceID, title string) 
 		return session.Session{}, err
 	}
 
-	return ws.Sessions.Create(ctx, title)
+	return ws.CreateSession(ctx, title)
 }
 
 // GetSession retrieves a session by workspace and session ID.
@@ -75,22 +74,14 @@ func (b *Backend) ListSessionMessages(ctx context.Context, workspaceID, sessionI
 		return nil, err
 	}
 
-	// Drain debounced updates so HTTP clients (and the TUI on session
-	// switch) observe the latest in-memory state rather than racing the
-	// debounce timer in message.Service.
+	// Every remote client reads through here, so this is where interrupted
+	// calls get settled for them.
+	if ws.AgentCoordinator != nil {
+		return ws.AgentCoordinator.ListSettledMessages(ctx, sessionID)
+	}
+	// Drain debounced updates so clients observe the latest in-memory state.
 	if err := ws.Messages.FlushAll(ctx); err != nil {
 		return nil, err
-	}
-	// A run that died with its server (a kill, an OOM, an upgrade) leaves
-	// its assistant messages with no finish part and its tool calls with
-	// no result, which the chat renders as a spinner forever. Give that
-	// transcript a terminal state before anyone reads it, but only while
-	// no run owns the session: the repair rewrites messages an in-flight
-	// turn is still streaming into.
-	if ws.AgentCoordinator == nil || !ws.AgentCoordinator.IsSessionBusy(sessionID) {
-		if err := agent.RepairInterruptedSession(ctx, ws.Messages, sessionID); err != nil {
-			return nil, err
-		}
 	}
 	return ws.Messages.List(ctx, sessionID)
 }
@@ -138,14 +129,17 @@ func (b *Backend) MCPServersEnabled(ctx context.Context, workspaceID string) ([]
 }
 
 // SetMCPServerDisabled toggles a repository-scoped MCP override for the
-// given workspace.
+// given workspace and applies it to the running client.
 func (b *Backend) SetMCPServerDisabled(ctx context.Context, workspaceID, name string, disabled bool) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
 
-	return ws.Sessions.SetMCPServerDisabled(ctx, name, disabled)
+	if err := ws.Sessions.SetMCPServerDisabled(ctx, name, disabled); err != nil {
+		return err
+	}
+	return mcptools.SetLocalDisabled(ctx, ws.Cfg, name, disabled)
 }
 
 // SetMCPServerConfigDisabled toggles an MCP server's disabled flag in the
@@ -156,7 +150,11 @@ func (b *Backend) SetMCPServerConfigDisabled(ctx context.Context, workspaceID, n
 		return err
 	}
 
-	return mcptools.SetConfigDisabled(ctx, ws.Cfg, config.ScopeGlobal, name, disabled)
+	override, err := session.HasMCPOverride(ctx, ws.Sessions, name)
+	if err != nil {
+		return err
+	}
+	return mcptools.SetConfigDisabled(ctx, ws.Cfg, config.ScopeGlobal, name, disabled, override)
 }
 
 // StartMCPServer starts the named MCP server for the given workspace even

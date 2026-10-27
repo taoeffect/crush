@@ -46,9 +46,31 @@ type CreatePermissionRequest struct {
 }
 
 type PermissionNotification struct {
+	SessionID  string `json:"session_id"`
 	ToolCallID string `json:"tool_call_id"`
 	Granted    bool   `json:"granted"`
 	Denied     bool   `json:"denied"`
+	// Cancelled is set when the request was abandoned before a decision
+	// (the turn was cancelled while the prompt was open).
+	Cancelled bool `json:"cancelled"`
+}
+
+// Outcome is how a permission prompt the user saw was resolved.
+type Outcome string
+
+const (
+	OutcomeGranted   Outcome = "granted"
+	OutcomeDenied    Outcome = "denied"
+	OutcomeCancelled Outcome = "cancelled"
+)
+
+// PromptObserver hears about every prompt the user is shown and how it
+// was resolved, in that order. Auto-approved calls show no prompt and
+// are not reported. Calls run off the requesting goroutine, so a slow
+// observer never delays the prompt or the tool.
+type PromptObserver interface {
+	PromptShown(ctx context.Context, req PermissionRequest)
+	PromptResolved(ctx context.Context, req PermissionRequest, outcome Outcome)
 }
 
 type PermissionRequest struct {
@@ -78,6 +100,12 @@ type Service interface {
 	// already been resolved or is unknown.
 	Deny(permission PermissionRequest) bool
 	Request(ctx context.Context, opts CreatePermissionRequest) (bool, error)
+	// PendingRequests returns every request still awaiting a decision,
+	// in the order they were published. Prompts are not serialized, so
+	// several can be open at once. A request is only reported while it
+	// can still be resolved; a request whose waiter was cancelled is not
+	// returned.
+	PendingRequests() []PermissionRequest
 	// AutoApproveSession adds an auto-approval hold on a session, so
 	// every permission request in it is granted without prompting.
 	// Holds are counted: a session stays auto-approved until every
@@ -115,6 +143,12 @@ type permissionService struct {
 	autoApproveSessionsMu sync.RWMutex
 	skip                  atomic.Bool
 	allowedTools          []string
+	observer              PromptObserver
+
+	// openRequests holds the prompts published and not yet returned
+	// from Request, in publication order.
+	openRequests   []PermissionRequest
+	openRequestsMu sync.Mutex
 }
 
 // resolve atomically removes the pending request entry for the given
@@ -122,7 +156,8 @@ type permissionService struct {
 // PermissionNotification and forwards the outcome to the waiter on
 // respCh. It returns true if this call resolved the request, false if
 // it had already been resolved (e.g., by another concurrent caller) or
-// the request ID is unknown.
+// the request ID is unknown. cancelled marks a request that was
+// abandoned without a decision; granted and denied are then false.
 //
 // If onResolve is non-nil it runs after the pending entry has been
 // taken but before the notification is published or the waiter is
@@ -134,7 +169,7 @@ type permissionService struct {
 // route through this helper, as does Request's own cancellation path,
 // so multi-subscriber UIs can race safely: the first caller wins, the
 // rest become no-ops.
-func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool, onResolve func()) bool {
+func (s *permissionService) resolve(permission PermissionRequest, granted, denied, cancelled bool, onResolve func()) bool {
 	respCh, ok := s.pendingRequests.Take(permission.ID)
 	if !ok {
 		return false
@@ -145,9 +180,11 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 	}
 
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+		SessionID:  permission.SessionID,
 		ToolCallID: permission.ToolCallID,
 		Granted:    granted,
 		Denied:     denied,
+		Cancelled:  cancelled,
 	})
 
 	// respCh is buffered (cap 1) and only ever has at most one sender
@@ -163,7 +200,7 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// pending-request race. Otherwise a losing GrantPersistent that
 	// lost to a Deny would still leave an auto-approve entry behind,
 	// silently flipping later denied calls to allowed.
-	return s.resolve(permission, true, false, func() {
+	return s.resolve(permission, true, false, false, func() {
 		s.sessionPermissions.Set(PermissionKey{
 			SessionID: permission.SessionID,
 			ToolName:  permission.ToolName,
@@ -174,11 +211,11 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 }
 
 func (s *permissionService) Grant(permission PermissionRequest) bool {
-	return s.resolve(permission, true, false, nil)
+	return s.resolve(permission, true, false, false, nil)
 }
 
 func (s *permissionService) Deny(permission PermissionRequest) bool {
-	return s.resolve(permission, false, true, nil)
+	return s.resolve(permission, false, true, false, nil)
 }
 
 func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
@@ -198,6 +235,7 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	// and audit subscribers see the outcome.
 	if hookApproved(ctx, opts.ToolCallID) {
 		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+			SessionID:  opts.SessionID,
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
@@ -208,6 +246,7 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	// of the checks below so that every request is visible the moment it
 	// is made, including one that ends up waiting on a human.
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+		SessionID:  opts.SessionID,
 		ToolCallID: opts.ToolCallID,
 	})
 
@@ -217,6 +256,7 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 
 	if autoApprove {
 		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+			SessionID:  opts.SessionID,
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
@@ -254,6 +294,7 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		Path:      permission.Path,
 	}); ok {
 		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+			SessionID:  opts.SessionID,
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
@@ -273,23 +314,83 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	// so this is a no-op unless a future exit path is added above them.
 	defer s.pendingRequests.Del(permission.ID)
 
+	s.openRequestsMu.Lock()
+	s.openRequests = append(s.openRequests, permission)
+	s.openRequestsMu.Unlock()
+	defer s.forgetOpenRequest(permission.ID)
+
 	// Publish the request
 	s.Publish(pubsub.CreatedEvent, permission)
+	resolved := s.observe(ctx, permission)
 
 	select {
 	case <-ctx.Done():
-		// A cancelled run still owes its subscribers a terminal event.
-		// Without one, a client that queued this request keeps a dead
-		// entry — and possibly an open dialog — that nothing can
+		// A cancelled run still owes its subscribers a cancelled terminal
+		// event. Without one, a client that queued this request keeps a
+		// dead entry — and possibly an open dialog — that nothing can
 		// resolve, so later live requests wait behind it and every
 		// answer to it is a no-op. resolve's Take is the single-winner
 		// rule: if a concurrent Grant or Deny already took the entry,
 		// this publishes nothing.
-		s.resolve(permission, false, true, nil)
+		if s.resolve(permission, false, false, true, nil) {
+			resolved(OutcomeCancelled)
+		} else {
+			// A decision won the race; resolve always delivers it.
+			resolved(outcomeOf(<-respCh))
+		}
 		return false, ctx.Err()
 	case granted := <-respCh:
+		resolved(outcomeOf(granted))
 		return granted, nil
 	}
+}
+
+// observe reports the prompt to the observer and returns the function
+// that reports its outcome. Both run on one goroutine so the observer
+// always hears them in order, and outlive ctx so a cancelled turn still
+// reports the cancellation.
+func (s *permissionService) observe(ctx context.Context, req PermissionRequest) func(Outcome) {
+	if s.observer == nil {
+		return func(Outcome) {}
+	}
+	ctx = context.WithoutCancel(ctx)
+	outcome := make(chan Outcome, 1)
+	go func() {
+		s.observer.PromptShown(ctx, req)
+		s.observer.PromptResolved(ctx, req, <-outcome)
+	}()
+	return func(o Outcome) { outcome <- o }
+}
+
+func outcomeOf(granted bool) Outcome {
+	if granted {
+		return OutcomeGranted
+	}
+	return OutcomeDenied
+}
+
+// PendingRequests returns the open requests that Grant/Deny can still
+// resolve. A request stays in openRequests until Request returns, which
+// is after its pendingRequests entry is taken, so the entry is checked
+// as well.
+func (s *permissionService) PendingRequests() []PermissionRequest {
+	s.openRequestsMu.Lock()
+	defer s.openRequestsMu.Unlock()
+	pending := make([]PermissionRequest, 0, len(s.openRequests))
+	for _, req := range s.openRequests {
+		if _, ok := s.pendingRequests.Get(req.ID); ok {
+			pending = append(pending, req)
+		}
+	}
+	return pending
+}
+
+func (s *permissionService) forgetOpenRequest(id string) {
+	s.openRequestsMu.Lock()
+	defer s.openRequestsMu.Unlock()
+	s.openRequests = slices.DeleteFunc(s.openRequests, func(req PermissionRequest) bool {
+		return req.ID == id
+	})
 }
 
 func (s *permissionService) AutoApproveSession(sessionID string) {
@@ -320,7 +421,9 @@ func (s *permissionService) SkipRequests() bool {
 	return s.skip.Load()
 }
 
-func NewPermissionService(workingDir string, skip bool, allowedTools []string) Service {
+// NewPermissionService creates the permission service. observer may be
+// nil.
+func NewPermissionService(workingDir string, skip bool, allowedTools []string, observer PromptObserver) Service {
 	svc := &permissionService{
 		Broker:              pubsub.NewBroker[PermissionRequest](),
 		notificationBroker:  pubsub.NewBroker[PermissionNotification](),
@@ -329,6 +432,7 @@ func NewPermissionService(workingDir string, skip bool, allowedTools []string) S
 		autoApproveSessions: make(map[string]int),
 		allowedTools:        allowedTools,
 		pendingRequests:     csync.NewMap[string, chan bool](),
+		observer:            observer,
 	}
 	svc.skip.Store(skip)
 	return svc

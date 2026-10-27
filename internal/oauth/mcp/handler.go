@@ -427,10 +427,9 @@ type authFlight struct {
 	once   sync.Once
 	result *auth.AuthorizationResult
 	err    error
-	// refs counts the callers sharing this flight: the creator plus every
-	// joiner waiting on the same redirect. Tests use it to wait for all
-	// concurrent callers to arrive before letting the redirect land.
-	refs atomic.Int64
+
+	// joined counts callers waiting on this flight instead of opening a tab.
+	joined atomic.Int32
 }
 
 // settle records the outcome of the flight and wakes everyone waiting on
@@ -452,15 +451,13 @@ func (r *callbackReceiver) begin() (*authFlight, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.flight != nil {
-		r.flight.refs.Add(1)
+		r.flight.joined.Add(1)
 		return r.flight, false, nil
 	}
 	if err := r.bindLocked(); err != nil {
 		return nil, false, err
 	}
-	flight := &authFlight{done: make(chan struct{})}
-	flight.refs.Store(1)
-	r.flight = flight
+	r.flight = &authFlight{done: make(chan struct{})}
 	return r.flight, true, nil
 }
 
@@ -600,7 +597,7 @@ func (r *callbackReceiver) fetchAuthorizationCode(ctx context.Context, args *aut
 	if !owned {
 		// Another request already opened the browser for this server. Wait
 		// for that redirect instead of opening a second tab.
-		slog.Debug("Joining in-progress MCP OAuth authorization", "name", r.serverName)
+		slog.Debug("Joining in-progress MCP OAuth authorization", "name", r.serverName, "waiting", flight.joined.Load())
 		return r.await(ctx, flight, false)
 	}
 	defer r.end(flight)
@@ -634,7 +631,6 @@ func (r *callbackReceiver) fetchAuthorizationCode(ctx context.Context, args *aut
 // releases the callback listener once the flow is done, so the port is
 // free again as soon as the authorization completes (or is abandoned).
 func (r *callbackReceiver) await(ctx context.Context, flight *authFlight, owned bool) (*auth.AuthorizationResult, error) {
-	defer flight.refs.Add(-1)
 	select {
 	case <-flight.done:
 		if owned {

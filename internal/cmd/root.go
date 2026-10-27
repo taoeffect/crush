@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -213,12 +214,24 @@ func Execute() {
 		_, _ = w.WriteString(heartbit.String())
 		rootCmd.SetVersionTemplate(b.String() + "\n" + defaultVersionTemplate)
 	}
-	if err := fang.Execute(
-		context.Background(),
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	err := fang.Execute(
+		ctx,
 		rootCmd,
 		fang.WithVersion(version.Version),
-		fang.WithNotifySignal(os.Interrupt),
-	); err != nil {
+		fang.WithErrorHandler(func(w io.Writer, styles fang.Styles, err error) {
+			if ctx.Err() == nil {
+				fang.DefaultErrorHandler(w, styles, err)
+			}
+		}),
+	)
+	interrupted := ctx.Err() != nil
+	stop()
+	switch {
+	case interrupted:
+		// An interrupt is not a failure worth printing; exit like a shell would.
+		os.Exit(130)
+	case err != nil:
 		os.Exit(1)
 	}
 }
@@ -276,7 +289,7 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 	debug, _ := cmd.Flags().GetBool("debug")
 	ctx := cmd.Context()
 
-	store, err := setupLocalConfigStore(cmd)
+	store, err := setupLocalConfigStore(ctx, cmd)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -336,7 +349,7 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 	return ws, cleanup, nil
 }
 
-func setupLocalConfigStore(cmd *cobra.Command) (*config.ConfigStore, error) {
+func setupLocalConfigStore(ctx context.Context, cmd *cobra.Command) (*config.ConfigStore, error) {
 	debug, _ := cmd.Flags().GetBool("debug")
 	yolo, _ := cmd.Flags().GetBool("yolo")
 	systemPromptPath, _ := cmd.Flags().GetString("sys-prompt")
@@ -348,7 +361,7 @@ func setupLocalConfigStore(cmd *cobra.Command) (*config.ConfigStore, error) {
 		return nil, err
 	}
 
-	store, err := config.Init(cwd, dataDir, debug)
+	store, err := config.Init(ctx, cwd, dataDir, debug)
 	if err != nil {
 		return nil, err
 	}

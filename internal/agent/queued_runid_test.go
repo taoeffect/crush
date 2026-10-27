@@ -98,8 +98,10 @@ func TestRun_QueuedRunIDPromptRunsRecursivelyAndPublishesRunComplete(t *testing.
 	small := &finishStreamModel{text: "title"}
 
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		SmallModel:  Model{Model: small, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		Models: fixedModels(
+			Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+			Model{Model: small, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		),
 		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
@@ -214,8 +216,10 @@ func TestRun_CancelKeepsQueuedPromptsForEditing(t *testing.T) {
 	small := &finishStreamModel{text: "title"}
 
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		SmallModel:  Model{Model: small, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		Models: fixedModels(
+			Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+			Model{Model: small, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		),
 		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
@@ -325,8 +329,10 @@ func TestRun_IdleWithQueueRunsSubmissionsOldestFirst(t *testing.T) {
 
 	model := &finishStreamModel{text: "done"}
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		SmallModel:  Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		Models: fixedModels(
+			Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+			Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		),
 		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
@@ -478,8 +484,10 @@ func TestRun_SubmissionDuringCompletionHandoffRunsAfterTheQueue(t *testing.T) {
 		entered: make(chan struct{}),
 	}
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		SmallModel:  Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		Models: fixedModels(
+			Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		),
 		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
@@ -635,8 +643,10 @@ func TestRun_SwappedHeadFailureIsNotAttributedToTheRequeuedSubmission(t *testing
 
 	streamErr := errors.New("provider rejected the request")
 	sa := NewSessionAgent(SessionAgentOptions{
-		LargeModel:  Model{Model: &errStreamModel{err: streamErr, text: "done"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
-		SmallModel:  Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		Models: fixedModels(
+			Model{Model: &errStreamModel{err: streamErr, text: "done"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
+		),
 		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,

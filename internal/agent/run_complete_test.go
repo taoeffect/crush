@@ -25,6 +25,7 @@ func TestSessionAgentRun_QueueStripsOnComplete(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
 	}).(*sessionAgent)
@@ -75,6 +76,7 @@ func TestDrainQueueForStep_FiltersUnderDispatchLock(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
 	}).(*sessionAgent)
@@ -112,6 +114,7 @@ func TestDrainQueueForStep_NoMarkFoldsAllNonRunID(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
 	}).(*sessionAgent)
@@ -139,6 +142,7 @@ func TestDrainQueueForStep_KeepsRunIDPromptsQueued(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
 	}).(*sessionAgent)
@@ -176,6 +180,7 @@ func TestDrainQueueForStep_SplitsCanceledPromptsByOwner(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
 	}).(*sessionAgent)
@@ -439,6 +444,7 @@ func TestClearQueue_QueuedRunIDPromptPublishesCancelledRunComplete(t *testing.T)
 	t.Cleanup(broker.Shutdown)
 
 	a := NewSessionAgent(SessionAgentOptions{
+		Models:      noModels,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		RunComplete: broker,
@@ -483,6 +489,7 @@ func TestClearQueue_PublishesCancelledRunCompleteForEveryRunIDBearingDrop(t *tes
 	t.Cleanup(broker.Shutdown)
 
 	a := NewSessionAgent(SessionAgentOptions{
+		Models:      noModels,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		RunComplete: broker,

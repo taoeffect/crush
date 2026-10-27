@@ -17,6 +17,11 @@ import (
 // so the prompt can never promise a tool the user disabled.
 func TestPlanPromptListsConfiguredTools(t *testing.T) {
 	env := testEnv(t)
+	// config.Init merges the user's global crush.json (and data-dir
+	// crush.json); a host-level disabled_tools list would change the
+	// advertised tools, so point both at empty directories.
+	t.Setenv("CRUSH_GLOBAL_CONFIG", t.TempDir())
+	t.Setenv("CRUSH_GLOBAL_DATA", t.TempDir())
 
 	// Minimal hermetic config so config.Init and the prompt build both
 	// succeed without touching the user's real provider config.
@@ -30,7 +35,7 @@ func TestPlanPromptListsConfiguredTools(t *testing.T) {
 }`
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "crush.json"), []byte(crushJSON), 0o644))
 
-	cfg, err := config.Init(env.workingDir, "", false)
+	cfg, err := config.Init(t.Context(), env.workingDir, "", false)
 	require.NoError(t, err)
 	cfg.SetupAgents()
 

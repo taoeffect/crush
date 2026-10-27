@@ -27,7 +27,7 @@ func hermeticApp(t *testing.T) *App {
 }`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "crush.json"), []byte(crushJSON), 0o644))
 
-	store, err := config.Init(dir, "", false)
+	store, err := config.Init(t.Context(), dir, "", false)
 	require.NoError(t, err)
 	store.SetupAgents()
 

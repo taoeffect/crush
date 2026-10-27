@@ -27,6 +27,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/filetracker"
@@ -59,16 +60,12 @@ import (
 
 // Coordinator errors.
 var (
-	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
-	errPlanAgentNotConfigured          = errors.New("plan agent not configured")
-	errMainAgentNotFound               = errors.New("main agent not found")
-	errModelProviderNotConfigured      = errors.New("model provider not configured")
-	errLargeModelNotSelected           = errors.New("large model not selected")
-	errSmallModelNotSelected           = errors.New("small model not selected")
-	errLargeModelProviderNotConfigured = errors.New("large model provider not configured")
-	errSmallModelProviderNotConfigured = errors.New("small model provider not configured")
-	errLargeModelNotFound              = errors.New("large model not found in provider config")
-	errSmallModelNotFound              = errors.New("small model not found in provider config")
+	errCoderAgentNotConfigured    = errors.New("coder agent not configured")
+	errPlanAgentNotConfigured     = errors.New("plan agent not configured")
+	errMainAgentNotFound          = errors.New("main agent not found")
+	errModelProviderNotConfigured = errors.New("model provider not configured")
+	errModelNotSelected           = errors.New("model not selected")
+	errModelNotFound              = errors.New("model not found in provider config")
 )
 
 // Copilot models that use the Responses API instead of Chat Completions.
@@ -84,8 +81,12 @@ var copilotResponsesModels = map[string]bool{
 	"gpt-5.6-terra": true,
 	"gpt-5.6-sol":   true,
 	"gpt-6-astra":   true,
+	"gpt-6-luna":    true,
+	"gpt-6-sol":     true,
+	"gpt-6.1-sol":   true,
 	"grok-4.5":      true,
 	"grok-4.6":      true,
+	"grok-4.7":      true,
 }
 
 // OpenCode models that use the Anthropic Messages API instead of Chat
@@ -132,6 +133,9 @@ type Coordinator interface {
 	CancelAll()
 	IsSessionBusy(sessionID string) bool
 	IsBusy() bool
+	// ListSettledMessages reads a session's transcript, first repairing any
+	// turn a dead process left without a finish or a tool result.
+	ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
 	ClearQueue(sessionID string) []QueuedMessage
@@ -161,6 +165,7 @@ type coordinator struct {
 	mainAgentName string
 	agents        map[string]SessionAgent
 	agentReady    map[string]*agentReadiness
+	hookRunner    *hooks.Runner
 
 	// ownership is the per-session run bookkeeping every agent built
 	// here shares, so a child session running on the `agent` tool's
@@ -168,6 +173,10 @@ type coordinator struct {
 	// cannot have a second concurrent turn started on it by a prompt
 	// dispatched on the coder agent.
 	ownership *sessionOwnership
+
+	// models is shared by every agent; rebuildMu serializes rebuilds of it.
+	models    csync.Value[coordinatorModels]
+	rebuildMu sync.Mutex
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -190,6 +199,7 @@ type CoordinatorOptions struct {
 	Notify      pubsub.Publisher[notify.Notification]
 	RunComplete pubsub.Publisher[notify.RunComplete]
 	Skills      *skills.Manager
+	HookRunner  *hooks.Runner
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -222,6 +232,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		allSkills:    allSkills,
 		activeSkills: activeSkills,
 		skillTracker: skillTracker,
+		hookRunner:   opts.HookRunner,
 	}
 
 	agentCfg, ok := opts.Config.Config().Agents[config.AgentCoder]
@@ -373,6 +384,9 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 
 	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(model, providerCfg)
 
+	// Inject session_id for OpenRouter sticky routing (no-op for other providers).
+	injectOpenrouterSessionID(mergedOptions, sessionID)
+
 	// Coalesce per-attempt RunComplete payloads so only the final
 	// outcome reaches subscribers. Without this, the first attempt's
 	// failed RunComplete (unauthorized) would race ahead of the
@@ -435,16 +449,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	result, originalErr := run()
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
 
-	// Notify only if still unauthorized after retry — a successful
-	// retry means the user doesn't need to re-authenticate. AWS SSO is
-	// handled transparently inside OnAuthRefresh, so it needs no post-run
-	// notification here.
-	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
-		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			Type:       notify.TypeReAuthenticate,
-			ProviderID: model.ModelCfg.Provider,
-		})
-	}
+	c.askToSignInAgain(originalErr, model)
 
 	if hasLatest && c.runComplete != nil {
 		c.runComplete.PublishMustDeliver(ctx, pubsub.UpdatedEvent, latest)
@@ -497,11 +502,11 @@ func (c *coordinator) buildRunModels(ctx context.Context, selection modelSelecti
 	return newRunModels(selection, isSubAgent, large, small), nil
 }
 
-// subAgentModels builds the model pair for a sub-agent turn started from
-// the run in ctx. The pair is rebuilt rather than shared because a
+// subAgentRunModels builds the model pair for a sub-agent turn started
+// from the run in ctx. The pair is rebuilt rather than shared because a
 // sub-agent's provider client differs (Copilot tags its traffic), but
 // the selection is the spawning run's.
-func (c *coordinator) subAgentModels(ctx context.Context) (*runModels, error) {
+func (c *coordinator) subAgentRunModels(ctx context.Context) (*runModels, error) {
 	selection, err := c.runSelection(ctx)
 	if err != nil {
 		return nil, err
@@ -888,6 +893,19 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	return options
 }
 
+// injectOpenrouterSessionID adds session_id to OpenRouter ProviderOptions
+// ExtraBody for sticky routing and upstream session grouping.
+func injectOpenrouterSessionID(opts fantasy.ProviderOptions, sessionID string) {
+	if o, ok := opts[openrouter.Name].(*openrouter.ProviderOptions); ok {
+		if o.ExtraBody == nil {
+			o.ExtraBody = make(map[string]any)
+		}
+		if _, exists := o.ExtraBody["session_id"]; !exists {
+			o.ExtraBody["session_id"] = session.HashID(sessionID)
+		}
+	}
+}
+
 func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
 	modelOptions := getProviderOptions(model, cfg)
 	temp := cmp.Or(model.ModelCfg.Temperature, model.CatwalkCfg.Options.Temperature)
@@ -980,21 +998,24 @@ func (c *coordinator) registerAgent(name string, agent SessionAgent, ready *agen
 // workspace's, and one shared sub-agent instance serves every parent
 // run.
 func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, *agentReadiness, error) {
-	large, small, err := c.buildAgentModels(ctx, isSubAgent)
-	if err != nil {
-		return nil, nil, err
+	if c.models.Get().large.Model == nil {
+		if err := c.rebuildModels(ctx); err != nil {
+			return nil, nil, err
+		}
 	}
-
-	// Use the model specified by the agent config.
-	primary := large
-	if agent.Model == config.SelectedModelTypeSmall {
-		primary = small
+	models := c.mainModels
+	switch {
+	case agent.Model == config.SelectedModelTypeSmall:
+		// An agent configured for the small model runs on it in both slots.
+		models = c.smallOnlyModels
+	case isSubAgent:
+		models = c.subAgentModels
 	}
+	primary := models().Large
 
 	disableAutoSummarize, disableContextStatus := compactionFlags(c.cfg.Config().Options.CompactionMethod, c.cfg.Config().Options.DisableAutoSummarize)
 	result := NewSessionAgent(SessionAgentOptions{
-		LargeModel:           primary,
-		SmallModel:           small,
+		Models:               models,
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: disableAutoSummarize,
@@ -1008,6 +1029,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		RunComplete:          c.runComplete,
 		Permissions:          c.permissions,
 		Ownership:            c.ownership,
+		Hooks:                c.hookRunner,
 	})
 
 	// The readiness goroutines below perform one-time setup — building the
@@ -1088,15 +1110,9 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	logFile := filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")
 
-	// Build hook runner if PreToolUse hooks are configured.
-	var hookRunner *hooks.Runner
-	if preToolHooks := c.cfg.Config().Hooks[hooks.EventPreToolUse]; len(preToolHooks) > 0 {
-		hookRunner = hooks.NewRunner(preToolHooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
-	}
-
 	allTools = append(
 		allTools,
-		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID),
+		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, c.cfg.Config().Options.GetMaxBackgroundJobs()),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
 		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory),
@@ -1201,131 +1217,104 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// without hook interception to avoid firing the user's hook N times
 	// per delegated turn. The top-level invocation of the sub-agent tool
 	// itself is still wrapped from the coder's side.
-	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
+	filteredTools = wrapToolsWithHooks(filteredTools, c.hookRunner, isSubAgent)
 
 	return filteredTools, nil
 }
 
 // configSelection reports the workspace's configured model pair. It is
-// the fallback for runs that did not ask for a specific model, and what
-// freshly built agents and the workspace-level Model() report use.
+// the fallback for runs that did not ask for a specific model.
 func (c *coordinator) configSelection() (modelSelection, error) {
 	cfg := c.cfg.Config()
 	large, ok := cfg.Models[config.SelectedModelTypeLarge]
 	if !ok {
-		return modelSelection{}, errLargeModelNotSelected
+		return modelSelection{}, fmt.Errorf("%s %w", config.SelectedModelTypeLarge, errModelNotSelected)
 	}
 	small, ok := cfg.Models[config.SelectedModelTypeSmall]
 	if !ok {
-		return modelSelection{}, errSmallModelNotSelected
+		return modelSelection{}, fmt.Errorf("%s %w", config.SelectedModelTypeSmall, errModelNotSelected)
 	}
 	return modelSelection{Large: large, Small: small}, nil
-}
-
-// TODO: when we support multiple agents we need to change this so that we pass in the agent specific model config
-func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Model, Model, error) {
-	selection, err := c.configSelection()
-	if err != nil {
-		return Model{}, Model{}, err
-	}
-	return c.buildModels(ctx, selection, isSubAgent)
 }
 
 // buildModels builds the language models for one selection. isSubAgent
 // picks the sub-agent flavor of the large model's provider client; the
 // small model is always built as a sub-agent one.
 func (c *coordinator) buildModels(ctx context.Context, selection modelSelection, isSubAgent bool) (Model, Model, error) {
-	largeModelCfg := selection.Large
-	smallModelCfg := selection.Small
+	large, err := c.buildSelectedModel(ctx, config.SelectedModelTypeLarge, selection.Large, isSubAgent)
+	if err != nil {
+		return Model{}, Model{}, err
+	}
+	small, err := c.buildSelectedModel(ctx, config.SelectedModelTypeSmall, selection.Small, true)
+	if err != nil {
+		return Model{}, Model{}, err
+	}
+	return large, small, nil
+}
 
-	largeProviderCfg, ok := c.cfg.Config().Providers.Get(largeModelCfg.Provider)
+// buildModel builds the model selected for one slot from the live config.
+// isSubAgent marks requests as agent-initiated for providers that bill on it.
+func (c *coordinator) buildModel(ctx context.Context, slot config.SelectedModelType, isSubAgent bool) (Model, error) {
+	modelCfg, ok := c.cfg.Config().Models[slot]
 	if !ok {
-		return Model{}, Model{}, errLargeModelProviderNotConfigured
+		return Model{}, fmt.Errorf("%s %w", slot, errModelNotSelected)
 	}
+	return c.buildSelectedModel(ctx, slot, modelCfg, isSubAgent)
+}
 
-	largeProvider, err := c.buildProvider(largeProviderCfg, largeModelCfg, isSubAgent)
-	if err != nil {
-		return Model{}, Model{}, err
-	}
-
-	smallProviderCfg, ok := c.cfg.Config().Providers.Get(smallModelCfg.Provider)
+// buildSelectedModel builds the model modelCfg selects. slot names the
+// slot in errors. isSubAgent marks requests as agent-initiated for
+// providers that bill on it.
+func (c *coordinator) buildSelectedModel(ctx context.Context, slot config.SelectedModelType, modelCfg config.SelectedModel, isSubAgent bool) (Model, error) {
+	providerCfg, ok := c.cfg.Config().Providers.Get(modelCfg.Provider)
 	if !ok {
-		return Model{}, Model{}, errSmallModelProviderNotConfigured
+		return Model{}, fmt.Errorf("%s %w", slot, errModelProviderNotConfigured)
 	}
-
-	smallProvider, err := c.buildProvider(smallProviderCfg, smallModelCfg, true)
+	provider, err := c.buildProvider(providerCfg, modelCfg, isSubAgent)
 	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, err
 	}
 
-	var largeCatwalkModel *catwalk.Model
-	var smallCatwalkModel *catwalk.Model
-
-	for _, m := range largeProviderCfg.Models {
-		if m.ID == largeModelCfg.Model {
-			largeCatwalkModel = &m
-		}
-	}
-	for _, m := range smallProviderCfg.Models {
-		if m.ID == smallModelCfg.Model {
-			smallCatwalkModel = &m
-		}
+	// Resolve the selected model from the provider's whole catalog: an
+	// API-key model, a ChatGPT subscription model, or a Grok one. The
+	// subscription catalogs live outside Models, so looking only there
+	// strands a Grok/ChatGPT model that catwalk doesn't also publish.
+	catwalkModel := c.cfg.Config().GetModel(modelCfg.Provider, modelCfg.Model)
+	if catwalkModel == nil {
+		return Model{}, fmt.Errorf("%s %w", slot, errModelNotFound)
 	}
 
-	if largeCatwalkModel == nil {
-		return Model{}, Model{}, errLargeModelNotFound
+	modelID := modelCfg.Model
+	if modelCfg.Provider == openrouter.Name && isExactoSupported(modelID) {
+		modelID += ":exacto"
 	}
-
-	if smallCatwalkModel == nil {
-		return Model{}, Model{}, errSmallModelNotFound
-	}
-
-	largeModelID := largeModelCfg.Model
-	smallModelID := smallModelCfg.Model
-
-	if largeModelCfg.Provider == openrouter.Name && isExactoSupported(largeModelID) {
-		largeModelID += ":exacto"
-	}
-
-	if smallModelCfg.Provider == openrouter.Name && isExactoSupported(smallModelID) {
-		smallModelID += ":exacto"
-	}
-
-	largeModel, err := largeProvider.LanguageModel(ctx, largeModelID)
+	languageModel, err := provider.LanguageModel(ctx, modelID)
 	if err != nil {
-		return Model{}, Model{}, err
-	}
-	smallModel, err := smallProvider.LanguageModel(ctx, smallModelID)
-	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, err
 	}
 
-	// Each request gets a fresh timeout budget, including retry attempts.
-	requestTimeout := c.cfg.Config().Options.GetRequestTimeout()
-	largeModel = newRequestTimeoutModel(largeModel, requestTimeout)
-	smallModel = newRequestTimeoutModel(smallModel, requestTimeout)
+	// Bound each request with the configured timeout so unreachable or hung
+	// providers fail instead of blocking a session forever. The wrapper is
+	// applied per request, so retries get a fresh budget each attempt.
+	languageModel = newRequestTimeoutModel(languageModel, c.cfg.Config().Options.GetRequestTimeout())
 
-	// Hyper completions omit the balance, so fetch credits per request.
-	if largeModelCfg.Provider == hyper.Name {
-		largeModel = newHyperCreditsModel(largeModel, c.hyperAPIKey)
-	}
-	if smallModelCfg.Provider == hyper.Name {
-		smallModel = newHyperCreditsModel(smallModel, c.hyperAPIKey)
+	// Hyper completions no longer report the hypercredit balance, so wrap
+	// the Hyper models to fetch it from /v1/credits on every request.
+	if modelCfg.Provider == hyper.Name {
+		languageModel = newHyperCreditsModel(languageModel, c.hyperAPIKey)
 	}
 
+	// OAuth and ProviderName drive askToSignInAgain, for runs and
+	// sub-agents as well as the shared models.
 	return Model{
-			Model:              largeModel,
-			CatwalkCfg:         *largeCatwalkModel,
-			ModelCfg:           largeModelCfg,
-			FlatRate:           largeProviderCfg.FlatRate,
-			SystemPromptPrefix: largeProviderCfg.SystemPromptPrefix,
-		}, Model{
-			Model:              smallModel,
-			CatwalkCfg:         *smallCatwalkModel,
-			ModelCfg:           smallModelCfg,
-			FlatRate:           smallProviderCfg.FlatRate,
-			SystemPromptPrefix: smallProviderCfg.SystemPromptPrefix,
-		}, nil
+		Model:              languageModel,
+		CatwalkCfg:         *catwalkModel,
+		ModelCfg:           modelCfg,
+		FlatRate:           providerCfg.FlatRate,
+		SystemPromptPrefix: providerCfg.SystemPromptPrefix,
+		OAuth:              providerCfg.OAuthToken != nil,
+		ProviderName:       providerCfg.Name,
+	}, nil
 }
 
 // hyperAPIKey picks up refreshed credentials for the next credits fetch.
@@ -1399,6 +1388,15 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 }
 
 func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+	if headers == nil {
+		headers = make(map[string]string)
+	}
+	if _, ok := headers["HTTP-Referer"]; !ok {
+		headers["HTTP-Referer"] = "https://charm.land/crush"
+	}
+	if _, ok := headers["X-Title"]; !ok {
+		headers["X-Title"] = "Crush"
+	}
 	opts := []openrouter.Option{
 		openrouter.WithAPIKey(apiKey),
 	}
@@ -1693,6 +1691,10 @@ func (c *coordinator) IsSessionBusy(sessionID string) bool {
 	return c.currentAgent().IsSessionBusy(sessionID)
 }
 
+func (c *coordinator) ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
+	return c.currentAgent().ListSettledMessages(ctx, sessionID)
+}
+
 func (c *coordinator) Model() Model {
 	return c.currentAgent().Model()
 }
@@ -1707,26 +1709,22 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 		return err
 	}
 
-	// A ChatGPT login without its model catalog — the fetch at login
-	// failed, or the credentials predate it — would leave the models
-	// dialog's ChatGPT section empty. Fill it in lazily; the guard makes
-	// this a no-op once the catalog exists.
+	// A ChatGPT or Grok login without its model catalog — the fetch at
+	// login failed, or the credentials predate it — would leave the
+	// models dialog's subscription section empty. Fill it in lazily; the
+	// guards make this a no-op once a catalog exists.
 	c.cfg.RefetchOpenAIChatGPTModels(ctx)
+	c.cfg.RefetchGrokModels(ctx)
 
 	return c.updateAgentModels(ctx, agent, name)
 }
 
-// updateAgentModels rebuilds the model and tool configuration for the
-// given agent from the current config.
+// updateAgentModels rebuilds the shared models and the given agent's tools
+// from the current config.
 func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent, name string) error {
-	// build the models again so we make sure we get the latest config
-	// isSubAgent is false here; sub-agents are rebuilt transitively
-	// via buildTools -> agentTool -> buildAgent below.
-	large, small, err := c.buildAgentModels(ctx, false)
-	if err != nil {
+	if err := c.rebuildModels(ctx); err != nil {
 		return err
 	}
-	agent.SetModels(large, small)
 	agent.SetCompactionFlags(compactionFlags(c.cfg.Config().Options.CompactionMethod, c.cfg.Config().Options.DisableAutoSummarize))
 	return c.updateTools(ctx, agent, name)
 }
@@ -1764,9 +1762,11 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 
 	// Auth failures during summarize flow through fantasy's OnAuthRefresh,
 	// the same path used by regular turns.
+	opts := getProviderOptions(models.Large(), providerCfg)
+	injectOpenrouterSessionID(opts, sessionID)
 	return active.Summarize(ctx, SummarizeCall{
 		SessionID:       sessionID,
-		ProviderOptions: getProviderOptions(models.Large(), providerCfg),
+		ProviderOptions: opts,
 		Models:          models,
 		OnAuthRefresh:   c.makeAuthRefreshCallback(providerCfg, c.runModelsRefresher(models)),
 	})
@@ -1838,8 +1838,9 @@ var errNoInteractiveAuth = errors.New("interactive authentication unavailable")
 
 // waitForInteractiveReauth blocks until interactive re-authentication for the
 // provider completes (signalled via SignalAuthComplete) or the context is
-// cancelled, then rebuilds the caller's models so the next attempt picks up
-// fresh credentials. Returns nil when the caller should retry.
+// cancelled, then rebuilds the caller's models and the shared models so the
+// next attempt picks up fresh credentials. Returns nil when the caller should
+// retry.
 func (c *coordinator) waitForInteractiveReauth(ctx context.Context, providerID string, refresh modelRefresher) error {
 	// Use a detached context with a generous timeout so the wait survives
 	// agent run cancellation. The user needs time to complete browser-based
@@ -1858,12 +1859,11 @@ func (c *coordinator) waitForInteractiveReauth(ctx context.Context, providerID s
 			"provider", providerID, "ctx_err", ctx.Err())
 		return ctx.Err()
 	}
-	// Rebuild the models so ModelProvider picks up the fresh credentials.
-	if refresh != nil {
-		if refreshErr := refresh(waitCtx); refreshErr != nil {
-			slog.Error("Failed to rebuild models after re-authentication", "error", refreshErr)
-			return refreshErr
-		}
+	// Rebuild this call's models and the shared models so ModelProvider
+	// picks up the fresh credentials.
+	if err := c.rebuildAfterRefresh(waitCtx, refresh); err != nil {
+		slog.Error("Failed to update models after re-authentication", "error", err)
+		return err
 	}
 	slog.Info("Models updated, returning nil to retry", "provider", providerID)
 	return nil
@@ -1891,15 +1891,29 @@ func (c *coordinator) makeAuthRefreshCallback(providerCfg config.ProviderConfig,
 	}
 }
 
+// rebuildAfterRefresh gives refreshed credentials to the caller's models,
+// through refresh, and to the shared models. The caller's retry depends
+// only on its own models, so a failed shared rebuild fails the call only
+// when refresh is nil.
+func (c *coordinator) rebuildAfterRefresh(ctx context.Context, refresh modelRefresher) error {
+	if refresh == nil {
+		return c.rebuildModels(ctx)
+	}
+	if err := refresh(ctx); err != nil {
+		return err
+	}
+	if err := c.rebuildModels(ctx); err != nil {
+		slog.Warn("Failed to rebuild shared models after credential refresh", "error", err)
+	}
+	return nil
+}
+
 func (c *coordinator) refreshOAuth2Token(ctx context.Context, providerCfg config.ProviderConfig, refresh modelRefresher) error {
 	if err := c.cfg.RefreshOAuthToken(ctx, config.ScopeGlobal, providerCfg.ID); err != nil {
 		slog.Error("Failed to refresh OAuth token after 401 error", "provider", providerCfg.ID, "error", err)
 		return err
 	}
-	if refresh == nil {
-		return nil
-	}
-	return refresh(ctx)
+	return c.rebuildAfterRefresh(ctx, refresh)
 }
 
 func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg config.ProviderConfig, refresh modelRefresher) error {
@@ -1911,11 +1925,19 @@ func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg con
 
 	providerCfg.APIKey = newAPIKey
 	c.cfg.Config().Providers.Set(providerCfg.ID, providerCfg)
+	return c.rebuildAfterRefresh(ctx, refresh)
+}
 
-	if refresh == nil {
-		return nil
+// askToSignInAgain asks the user to sign in again when an OAuth credential
+// is still refused after the refresh-and-retry.
+func (c *coordinator) askToSignInAgain(err error, model Model) {
+	if err == nil || !isUnauthorized(err) || c.notify == nil || !model.OAuth {
+		return
 	}
-	return refresh(ctx)
+	c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+		Type:       notify.TypeReAuthenticate,
+		ProviderID: model.ModelCfg.Provider,
+	})
 }
 
 // subAgentParams holds the parameters for running a sub-agent.
@@ -1988,12 +2010,14 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 
 	// Run the agent
 	run := func() (*fantasy.AgentResult, error) {
+		subOpts := getProviderOptions(model, providerCfg)
+		injectOpenrouterSessionID(subOpts, session.ID)
 		return params.Agent.Run(ctx, SessionAgentCall{
 			SessionID:        session.ID,
 			Prompt:           params.Prompt,
 			SystemPrompt:     params.SystemPrompt,
 			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  getProviderOptions(model, providerCfg),
+			ProviderOptions:  subOpts,
 			Temperature:      model.ModelCfg.Temperature,
 			TopP:             model.ModelCfg.TopP,
 			TopK:             callTopK(providerCfg, model.ModelCfg.TopK),
@@ -2007,14 +2031,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		})
 	}
 	result, err := run()
-	// Notify only if still unauthorized after retry. AWS SSO is handled
-	// transparently inside OnAuthRefresh, so it needs no post-run notice.
-	if err != nil && isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
-		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			Type:       notify.TypeReAuthenticate,
-			ProviderID: model.ModelCfg.Provider,
-		})
-	}
+	c.askToSignInAgain(err, model)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
 	}

@@ -46,7 +46,7 @@ func NewAppWorkspace(a *app.App, store *config.ConfigStore) *AppWorkspace {
 // -- Sessions --
 
 func (w *AppWorkspace) CreateSession(ctx context.Context, title string) (session.Session, error) {
-	return w.app.Sessions.Create(ctx, title)
+	return w.app.CreateSession(ctx, title)
 }
 
 func (w *AppWorkspace) GetSession(ctx context.Context, sessionID string) (session.Session, error) {
@@ -118,21 +118,11 @@ func (w *AppWorkspace) RoutesChannelEvents() bool { return false }
 // -- Messages --
 
 func (w *AppWorkspace) ListMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
-	// Drain any debounced updates so the caller observes the latest
-	// in-memory state. message.Service buffers streaming deltas and a
-	// cold List would otherwise miss them at session-switch time.
+	if w.app.AgentCoordinator != nil {
+		return w.app.AgentCoordinator.ListSettledMessages(ctx, sessionID)
+	}
 	if err := w.app.Messages.FlushAll(ctx); err != nil {
 		slog.Warn("Failed to flush pending message updates before listing messages", "sessionID", sessionID, "error", err)
-	}
-	// A run that died with its process leaves assistant messages with no
-	// finish part and tool calls with no result, which the chat renders
-	// as a spinner forever. Repair that transcript before anyone reads
-	// it, but only while no run owns the session: the repair rewrites
-	// messages an in-flight turn is still streaming into.
-	if !w.sessionIsBusy(sessionID) {
-		if err := agent.RepairInterruptedSession(ctx, w.app.Messages, sessionID); err != nil {
-			return nil, err
-		}
 	}
 	return w.app.Messages.List(ctx, sessionID)
 }
@@ -574,16 +564,24 @@ func (w *AppWorkspace) MCPServersEnabled(ctx context.Context) ([]string, error) 
 	return w.app.Sessions.MCPServersEnabled(ctx)
 }
 
-// MCPSetServerDisabled adds or removes a repository-scoped MCP override.
-// Config files are never touched.
+// MCPSetServerDisabled adds or removes a repository-scoped MCP override
+// and applies it to the running client. Config files are never touched.
 func (w *AppWorkspace) MCPSetServerDisabled(ctx context.Context, name string, disabled bool) error {
-	return w.app.Sessions.SetMCPServerDisabled(ctx, name, disabled)
+	if err := w.app.Sessions.SetMCPServerDisabled(ctx, name, disabled); err != nil {
+		return err
+	}
+	return mcptools.SetLocalDisabled(ctx, w.store, name, disabled)
 }
 
 // MCPSetServerConfigDisabled toggles an MCP server's disabled flag in the
-// global config and applies the change to the running client.
+// global config and applies the change to the running client unless a
+// repository-scoped override takes precedence.
 func (w *AppWorkspace) MCPSetServerConfigDisabled(ctx context.Context, name string, disabled bool) error {
-	return mcptools.SetConfigDisabled(ctx, w.store, config.ScopeGlobal, name, disabled)
+	override, err := session.HasMCPOverride(ctx, w.app.Sessions, name)
+	if err != nil {
+		return err
+	}
+	return mcptools.SetConfigDisabled(ctx, w.store, config.ScopeGlobal, name, disabled, override)
 }
 
 // MCPStartServer starts the named MCP server even when its config entry is

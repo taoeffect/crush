@@ -31,7 +31,7 @@ func Translate(ev any) Event {
 			Description: e.Payload.Description,
 		}
 	case pubsub.Event[permission.PermissionNotification]:
-		return permissionNotification(e.Payload.ToolCallID, e.Payload.Granted, e.Payload.Denied)
+		return permissionNotification(e.Payload.ToolCallID, e.Payload.Granted, e.Payload.Denied, e.Payload.Cancelled)
 	case pubsub.Event[question.Request]:
 		var text string
 		if len(e.Payload.Questions) > 0 {
@@ -78,7 +78,7 @@ func Translate(ev any) Event {
 			Description: e.Payload.Description,
 		}
 	case pubsub.Event[proto.PermissionNotification]:
-		return permissionNotification(e.Payload.ToolCallID, e.Payload.Granted, e.Payload.Denied)
+		return permissionNotification(e.Payload.ToolCallID, e.Payload.Granted, e.Payload.Denied, e.Payload.Cancelled)
 	case pubsub.Event[proto.QuestionRequest]:
 		var text string
 		if len(e.Payload.Questions) > 0 {
@@ -105,16 +105,16 @@ func Translate(ev any) Event {
 }
 
 // permissionNotification maps a permission notification to a herdr
-// event. Only a granted or denied notification ends the wait: the
-// permission service also publishes a flagless notification the
-// moment a request *starts*, before publishing the request itself
+// event. Only a granted, denied or cancelled notification ends the
+// wait: the permission service also publishes a flagless notification
+// the moment a request *starts*, before publishing the request itself
 // (permissionService.Request). Treating that marker as a resolution
 // is unsafe because local mode consumes the request broker and the
 // notification broker on separate goroutines, so the clear can land
 // after the set and leave the pane reporting working while the
 // prompt is still on screen.
-func permissionNotification(toolCallID string, granted, denied bool) Event {
-	if !granted && !denied {
+func permissionNotification(toolCallID string, granted, denied, cancelled bool) Event {
+	if !granted && !denied && !cancelled {
 		return nil
 	}
 	return PermissionResolved{ToolCallID: toolCallID}
