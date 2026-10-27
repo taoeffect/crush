@@ -27,6 +27,9 @@ import { fileURLToPath } from "node:url";
 //   - The working tree must be clean before the script runs.
 //   - The current branch must be `mine` unless overridden.
 //   - The next tag must not already exist locally.
+//   - The remote must be reachable with working credentials. This catches
+//     sandboxes that hide ~/.ssh before any file is changed, so the script
+//     does not stop halfway with a commit and tag that were never pushed.
 //
 // Helpful dry run:
 //   node scripts/bump-version-and-release.mjs --dry-run
@@ -149,7 +152,9 @@ function run(command, args, options = {}) {
   return execFileSync(command, args, {
     cwd: repoRoot,
     encoding: "utf8",
+    env: options.env ?? process.env,
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
+    timeout: options.timeout,
   });
 }
 
@@ -268,6 +273,39 @@ function assertLocalTagDoesNotExist(tag) {
   throw new Error(`Local tag already exists: ${tag}`);
 }
 
+function hasCustomSSHCommand() {
+  if (process.env.GIT_SSH_COMMAND || process.env.GIT_SSH) {
+    return true;
+  }
+  try {
+    return run("git", ["config", "--get", "core.sshCommand"], { capture: true }).trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
+// `git ls-remote` logs in to the remote the same way push does, but only reads
+// the branch list, so it changes nothing locally or remotely. BatchMode and
+// GIT_TERMINAL_PROMPT=0 make it fail fast instead of waiting for a passphrase,
+// host key, or password prompt. A custom SSH command set by the user is kept.
+function assertRemoteAccess(remote) {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  if (!hasCustomSSHCommand()) {
+    env.GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=10";
+  }
+
+  try {
+    run("git", ["ls-remote", "--heads", remote], { capture: true, env, timeout: 30_000 });
+  } catch (error) {
+    const details = (error.stderr ?? "").toString().trim() || error.message;
+    throw new Error(
+      `Cannot access remote ${remote}. Nothing was changed.\n` +
+        `Are you in a sandbox without SSH keys? Re-run this script outside it.\n` +
+        `git ls-remote said: ${details}`,
+    );
+  }
+}
+
 async function readPackageVersion(packageJSONPath) {
   const packageJSON = JSON.parse(await readFile(packageJSONPath, "utf8"));
   if (!packageJSON.version) {
@@ -316,6 +354,7 @@ async function main() {
   assertCleanWorkingTree();
   assertCurrentBranch(args.branch);
   assertLocalTagDoesNotExist(tag);
+  assertRemoteAccess(args.remote);
 
   run("node", [prepareScriptPath, nextVersion.version]);
   run("git", ["diff", "--", "npm/package.json"]);
