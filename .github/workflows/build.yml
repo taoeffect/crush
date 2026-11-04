@@ -17,14 +17,28 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # Node uses its built-in CA list, which still trusts the bad roots, and
+      # does not read the system bundle that the CA fix steps below fix. This
+      # flag makes Node use the file in SSL_CERT_FILE, which those steps set,
+      # in place of its built-in list. It is not set on Windows: no step there
+      # sets SSL_CERT_FILE, so Node's OpenSSL would read its build-time path,
+      # which has no bundle.
+      # https://github.com/okTurtles/libcheloniajs/blob/main/.github/actions/fix-ubuntu-ca-roots/action.yml
+      # https://github.com/nodejs/node/blob/main/deps/openssl/openssl_common.gypi
+      NODE_OPTIONS: ${{ (matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest') && '--use-openssl-ca' || '' }}
     steps:
+      - uses: okTurtles/libcheloniajs/.github/actions/fix-ubuntu-ca-roots@main
+        if: runner.os == 'Linux'
       # Remove the compromised eMudhra roots (plus the Comodo AAA root that
       # curl's fix also drops) from the runner's preinstalled /etc/ssl/cert.pem
       # before anything makes a TLS request. Inlined rather than used as a
       # composite action so it can run before checkout. Each awk pass drops one
       # named `=== ` block from the bundle; the result is only installed if it
       # is non-empty. The last check fails the job if the bundle still holds
-      # one of the roots, for example when the install was skipped.
+      # one of the roots, for example when the install was skipped. Then the
+      # step sets SSL_CERT_FILE, so that Node (see NODE_OPTIONS above) uses
+      # the fixed file in the steps after it.
       # https://emudhra.we-have-a-problem.com/#macos-curl
       # https://raw.githubusercontent.com/curl/curl/f0da5390ad9d380807cc83e600196809df8bb96b/.github/actions/macos-fix-certs/action.yml
       - name: Fix macOS runner CA root bundle
@@ -49,41 +63,7 @@ jobs:
             echo "::error::/etc/ssl/cert.pem still trusts a compromised root"
             exit 1
           fi
-      # Upgrade the system CA bundle (ca-certificates) and the NSS built-in
-      # roots (libnss3), then distrust the compromised eMudhra roots (plus the
-      # Comodo AAA root that curl's fix also drops) in the Ubuntu runner's
-      # system trust store before anything makes a TLS request. The patched
-      # Ubuntu package still ships emSign ECC Root CA - C3 and
-      # emSign Root CA - C1, and a runner image built before the fix still has
-      # the old package. Each sed expression prefixes one line of
-      # /etc/ca-certificates.conf with `!`, so update-ca-certificates leaves
-      # that root out of the bundle. A root that the package already removed
-      # has no line, so its expression does nothing. The last check fails the
-      # job if the bundle still holds one of the roots, for example after a
-      # future package renames a file.
-      # https://emudhra.we-have-a-problem.com/#linux
-      # https://bugs.launchpad.net/ubuntu/+source/ca-certificates/+bug/2171507
-      - name: Fix Ubuntu runner CA root bundle
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --only-upgrade ca-certificates 'libnss3*'
-          dpkg -l ca-certificates 'libnss3*' | grep ^ii
-          sudo sed -i \
-            -e 's|^mozilla/emSign_ECC_Root_CA_-_G3\.crt$|!&|' \
-            -e 's|^mozilla/emSign_ECC_Root_CA_-_C3\.crt$|!&|' \
-            -e 's|^mozilla/emSign_Root_CA_-_C1\.crt$|!&|' \
-            -e 's|^mozilla/Comodo_AAA_Services_root\.crt$|!&|' \
-            /etc/ca-certificates.conf
-          grep -E 'emSign|Comodo_AAA' /etc/ca-certificates.conf || true
-          sudo update-ca-certificates
-          if openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt |
-               openssl pkcs7 -print_certs -noout |
-               grep -E 'emSign ECC Root CA - (G3|C3)|emSign Root CA - C1|AAA Certificate Services'; then
-            echo "::error::/etc/ssl/certs/ca-certificates.crt still trusts a compromised root"
-            exit 1
-          fi
+          echo "SSL_CERT_FILE=/etc/ssl/cert.pem" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
