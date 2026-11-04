@@ -49,32 +49,20 @@ jobs:
             echo "::error::/etc/ssl/cert.pem still trusts a compromised root"
             exit 1
           fi
-      # Distrust the same four roots in the Ubuntu runner's system trust store
-      # before anything makes a TLS request. Each sed expression prefixes one
-      # line of /etc/ca-certificates.conf with `!`, so update-ca-certificates
-      # leaves that root out of the bundle. A root that a patched
-      # ca-certificates package already removed has no line, so its expression
-      # does nothing. The last check fails the job if the bundle still holds
-      # one of the roots, for example after a future package renames a file.
-      # https://emudhra.we-have-a-problem.com/#linux
-      - name: Fix Ubuntu runner CA root bundle
+      # Ubuntu's ca-certificates update already fixes the eMudhra issue, so the
+      # Ubuntu runner needs no manual fix. Upgrade the CA packages before
+      # anything makes a TLS request, in case the runner image is older than
+      # the fix. libnss3 is upgraded too because NSS keeps its own list of
+      # trusted roots.
+      # https://emudhra.we-have-a-problem.com/#developers
+      # https://bugs.launchpad.net/ubuntu/+source/ca-certificates/+bug/2171507
+      - name: Update Ubuntu runner CA certificates
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo sed -i \
-            -e 's|^mozilla/emSign_ECC_Root_CA_-_G3\.crt$|!&|' \
-            -e 's|^mozilla/emSign_ECC_Root_CA_-_C3\.crt$|!&|' \
-            -e 's|^mozilla/emSign_Root_CA_-_C1\.crt$|!&|' \
-            -e 's|^mozilla/Comodo_AAA_Services_root\.crt$|!&|' \
-            /etc/ca-certificates.conf
-          grep -E 'emSign|Comodo_AAA' /etc/ca-certificates.conf || true
-          sudo update-ca-certificates
-          if openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt |
-               openssl pkcs7 -print_certs -noout |
-               grep -E 'emSign ECC Root CA - (G3|C3)|emSign Root CA - C1|AAA Certificate Services'; then
-            echo "::error::/etc/ssl/certs/ca-certificates.crt still trusts a compromised root"
-            exit 1
-          fi
+          sudo apt-get update
+          sudo apt-get install -y --only-upgrade ca-certificates 'libnss3*'
+          dpkg -l ca-certificates 'libnss3*' | grep ^ii
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
