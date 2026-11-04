@@ -16,6 +16,63 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # Remove the compromised eMudhra roots (plus the Comodo AAA root that
+      # curl's fix also drops) from the runner's preinstalled /etc/ssl/cert.pem
+      # before anything makes a TLS request. Inlined rather than used as a
+      # composite action so it can run before checkout. Each awk pass drops one
+      # named `=== ` block from the bundle; the result is only installed if it
+      # is non-empty. The last check fails the job if the bundle still holds
+      # one of the roots, for example when the install was skipped.
+      # https://emudhra.we-have-a-problem.com/#macos-curl
+      # https://raw.githubusercontent.com/curl/curl/f0da5390ad9d380807cc83e600196809df8bb96b/.github/actions/macos-fix-certs/action.yml
+      - name: Fix macOS runner CA root bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          ls -lA /etc/ssl/cert.pem
+          t="$(mktemp)" && \
+            awk -v s='=== /C=IN/OU=emSign PKI/O=eMudhra Technologies Limited/CN=emSign ECC Root CA - G3' \
+              '/^(===|###) /{skip=0} $0==s{skip=1} !skip' /etc/ssl/cert.pem | \
+            awk -v s='=== /C=US/OU=emSign PKI/O=eMudhra Inc/CN=emSign ECC Root CA - C3' \
+              '/^(===|###) /{skip=0} $0==s{skip=1} !skip' | \
+            awk -v s='=== /C=US/OU=emSign PKI/O=eMudhra Inc/CN=emSign Root CA - C1' \
+              '/^(===|###) /{skip=0} $0==s{skip=1} !skip' | \
+            awk -v s='=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services' \
+              '/^(===|###) /{skip=0} $0==s{skip=1} !skip' > "$t" && \
+            [ -s "$t" ] && sudo install -m 0644 -o root -g wheel "$t" /etc/ssl/cert.pem; rm -f "$t"
+          ls -lA /etc/ssl/cert.pem
+          if openssl crl2pkcs7 -nocrl -certfile /etc/ssl/cert.pem |
+               openssl pkcs7 -print_certs -noout |
+               grep -E 'emSign ECC Root CA - (G3|C3)|emSign Root CA - C1|AAA Certificate Services'; then
+            echo "::error::/etc/ssl/cert.pem still trusts a compromised root"
+            exit 1
+          fi
+      # Distrust the same four roots in the Ubuntu runner's system trust store
+      # before anything makes a TLS request. Each sed expression prefixes one
+      # line of /etc/ca-certificates.conf with `!`, so update-ca-certificates
+      # leaves that root out of the bundle. A root that a patched
+      # ca-certificates package already removed has no line, so its expression
+      # does nothing. The last check fails the job if the bundle still holds
+      # one of the roots, for example after a future package renames a file.
+      # https://emudhra.we-have-a-problem.com/#linux
+      - name: Fix Ubuntu runner CA root bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo sed -i \
+            -e 's|^mozilla/emSign_ECC_Root_CA_-_G3\.crt$|!&|' \
+            -e 's|^mozilla/emSign_ECC_Root_CA_-_C3\.crt$|!&|' \
+            -e 's|^mozilla/emSign_Root_CA_-_C1\.crt$|!&|' \
+            -e 's|^mozilla/Comodo_AAA_Services_root\.crt$|!&|' \
+            /etc/ca-certificates.conf
+          grep -E 'emSign|Comodo_AAA' /etc/ca-certificates.conf || true
+          sudo update-ca-certificates
+          if openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt |
+               openssl pkcs7 -print_certs -noout |
+               grep -E 'emSign ECC Root CA - (G3|C3)|emSign Root CA - C1|AAA Certificate Services'; then
+            echo "::error::/etc/ssl/certs/ca-certificates.crt still trusts a compromised root"
+            exit 1
+          fi
       # By default, the GitHub Action on Windows uses `core.autocrlf=true`.
       # LF is converted to CRLF, this produces reports from formatters (gofmt/gofumpt/etc.).
       - run: "git config --global core.autocrlf input"
