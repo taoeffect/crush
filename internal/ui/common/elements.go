@@ -8,12 +8,12 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"charm.land/tone"
 	"charm.land/x/nerdfont"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/exp/charmtone"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -148,7 +148,7 @@ func formatTokensAndCost(t *styles.Styles, tokens, contextWindow int64, cost flo
 	percentageStyle := t.ModelInfo.TokenPercentage
 	if estimated {
 		percentageText = "~" + percentageText
-		percentageStyle = percentageStyle.Foreground(charmtone.Tang)
+		percentageStyle = percentageStyle.Foreground(tone.Tang)
 	}
 	formattedPercentage := percentageStyle.Render(percentageText)
 	formattedTokens = fmt.Sprintf("%s %s", formattedPercentage, formattedTokens)

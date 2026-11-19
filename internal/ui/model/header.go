@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"charm.land/tone"
 	"charm.land/x/nerdfont"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
@@ -14,7 +15,6 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/exp/charmtone"
 )
 
 const (
@@ -168,7 +168,7 @@ func renderHeaderDetails(
 		percentageStyle := t.Header.Percentage
 		if session.EstimatedUsage {
 			percentageText = "~" + percentageText
-			percentageStyle = percentageStyle.Foreground(charmtone.Tang)
+			percentageStyle = percentageStyle.Foreground(tone.Tang)
 		}
 		formattedPercentage := percentageStyle.Render(percentageText)
 		parts = append(parts, formattedPercentage)

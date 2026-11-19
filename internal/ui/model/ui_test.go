@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/v3/pkg/catwalk"
+	"charm.land/tone"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -24,7 +25,6 @@ import (
 	"github.com/charmbracelet/crush/internal/workspace"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/exp/charmtone"
 	"github.com/stretchr/testify/require"
 )
 
@@ -129,7 +129,7 @@ func TestRenderHeaderDetailsStylesEstimatedUsageWithTang(t *testing.T) {
 	actual := ansi.Strip(rendered)
 
 	require.Contains(t, actual, "~12%")
-	require.True(t, strings.Contains(rendered, sty.Header.Percentage.Foreground(charmtone.Tang).Render("~12%")))
+	require.True(t, strings.Contains(rendered, sty.Header.Percentage.Foreground(tone.Tang).Render("~12%")))
 }
 
 func TestHandleSelectModelPersistsWorkspaceScope(t *testing.T) {
