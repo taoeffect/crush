@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	hyperp "github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/env"
 	"github.com/charmbracelet/crush/internal/lock"
@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth/grok"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
 	"github.com/charmbracelet/crush/internal/oauth/openai"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
@@ -68,8 +69,8 @@ type configFileCacheEntry struct {
 // disk. They are applied on top of the loaded Config and survive only for
 // the lifetime of the process (or workspace).
 type RuntimeOverrides struct {
-	SkipPermissionRequests bool
-	SystemPromptPath       string
+	PermissionMode   permission.PermissionMode
+	SystemPromptPath string
 	// EnabledChannels lists the MCP servers opted in as channels for this
 	// session (via the --channels flag). A server present in MCP config only
 	// pushes channel events when it also appears here. Entries may be written
@@ -80,6 +81,10 @@ type RuntimeOverrides struct {
 	// selection made here always outranks whatever the shared config file
 	// happens to hold — see pinPreferredModelLocked.
 	Models map[SelectedModelType]SelectedModel
+	// Prompts replaces built-in prompts for this session only (via the
+	// --prompt flag). Entries win over options.prompts and hold absolute
+	// paths, since they were resolved against the invoking shell's cwd.
+	Prompts PromptPaths
 }
 
 // ConfigStore is the single entry point for all config access. It owns the
@@ -1719,7 +1724,7 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 
 	// Reconfigure providers
 	env := env.New()
-	resolver := NewShellVariableResolver(env)
+	resolver := NewShellVariableResolver(env, WithWorkingDir(s.workingDir))
 
 	// Apply top-level env vars before configuring providers so variables
 	// like AWS_PROFILE are visible to the AWS SDK credential chain.

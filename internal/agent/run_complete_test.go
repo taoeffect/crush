@@ -25,6 +25,7 @@ func TestSessionAgentRun_QueueStripsOnComplete(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Cfg:      testConfigStore(),
 		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
@@ -76,6 +77,7 @@ func TestDrainQueueForStep_FiltersUnderDispatchLock(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Cfg:      testConfigStore(),
 		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
@@ -114,6 +116,7 @@ func TestDrainQueueForStep_NoMarkFoldsAllNonRunID(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Cfg:      testConfigStore(),
 		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
@@ -142,6 +145,7 @@ func TestDrainQueueForStep_KeepsRunIDPromptsQueued(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Cfg:      testConfigStore(),
 		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
@@ -180,6 +184,7 @@ func TestDrainQueueForStep_SplitsCanceledPromptsByOwner(t *testing.T) {
 
 	env := testEnv(t)
 	a := NewSessionAgent(SessionAgentOptions{
+		Cfg:      testConfigStore(),
 		Models:   noModels,
 		Sessions: env.sessions,
 		Messages: env.messages,
@@ -444,6 +449,7 @@ func TestClearQueue_QueuedRunIDPromptPublishesCancelledRunComplete(t *testing.T)
 	t.Cleanup(broker.Shutdown)
 
 	a := NewSessionAgent(SessionAgentOptions{
+		Cfg:         testConfigStore(),
 		Models:      noModels,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
@@ -489,6 +495,7 @@ func TestClearQueue_PublishesCancelledRunCompleteForEveryRunIDBearingDrop(t *tes
 	t.Cleanup(broker.Shutdown)
 
 	a := NewSessionAgent(SessionAgentOptions{
+		Cfg:         testConfigStore(),
 		Models:      noModels,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
@@ -869,4 +876,26 @@ func TestCancelAll_ShutdownDiscardsQueueOnBusySession(t *testing.T) {
 	requireCancelledRunCompletes(t, ch, sessionID, "run-queued")
 	require.Equal(t, 0, a.QueuedPrompts(sessionID),
 		"shutdown must discard the queue of a session that is still busy")
+}
+
+// TestQueuedPromptsList_SkipsHidden pins that a hidden continuation is
+// counted for scheduling but never listed for the queue pill.
+func TestQueuedPromptsList_SkipsHidden(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	a := NewSessionAgent(SessionAgentOptions{
+		Models:   noModels,
+		Sessions: env.sessions,
+		Messages: env.messages,
+	}).(*sessionAgent)
+
+	const sessionID = "hidden-queue"
+	a.messageQueue.Set(sessionID, []SessionAgentCall{
+		{SessionID: sessionID, Prompt: "visible"},
+		{SessionID: sessionID, Prompt: "continue the plan", HiddenUserMessage: true},
+	})
+
+	require.Equal(t, 2, a.QueuedPrompts(sessionID))
+	require.Equal(t, []string{"visible"}, a.QueuedPromptsList(sessionID))
 }

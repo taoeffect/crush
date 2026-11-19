@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"gopkg.in/yaml.v3"
@@ -133,11 +134,11 @@ func (s *Skill) Validate() error {
 
 	if s.Description == "" {
 		errs = append(errs, errors.New("description is required"))
-	} else if len(s.Description) > MaxDescriptionLength {
+	} else if utf8.RuneCountInString(s.Description) > MaxDescriptionLength {
 		errs = append(errs, fmt.Errorf("description exceeds %d characters", MaxDescriptionLength))
 	}
 
-	if len(s.Compatibility) > MaxCompatibilityLength {
+	if utf8.RuneCountInString(s.Compatibility) > MaxCompatibilityLength {
 		errs = append(errs, fmt.Errorf("compatibility exceeds %d characters", MaxCompatibilityLength))
 	}
 

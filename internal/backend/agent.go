@@ -42,7 +42,8 @@ func (b *Backend) SendMessage(workspaceID string, msg proto.AgentMessage) error 
 		return err
 	}
 
-	if ws.AgentCoordinator == nil {
+	coord := ws.Coordinator()
+	if coord == nil {
 		return ErrAgentNotInitialized
 	}
 
@@ -54,7 +55,7 @@ func (b *Backend) SendMessage(workspaceID string, msg proto.AgentMessage) error 
 		return err
 	}
 
-	accept := ws.AgentCoordinator.BeginAccepted(msg.SessionID)
+	accept := coord.BeginAccepted(msg.SessionID)
 
 	ws.runMu.Lock()
 	if ws.closing {
@@ -65,15 +66,15 @@ func (b *Backend) SendMessage(workspaceID string, msg proto.AgentMessage) error 
 	ws.runWG.Add(1)
 	ws.runMu.Unlock()
 
-	go b.runAgent(ws, msg, accept, ws.newRun(msg, b.runDuration()))
+	go b.runAgent(ws, coord, msg, accept, ws.newRun(msg, b.runDuration()))
 	return nil
 }
 
-// runAgent executes an accepted agent run for the workspace. It owns the
-// accept reservation (releasing it on return), the runWG ticket added by
-// SendMessage, and the run handle SendMessage registered: the deferred
-// end() stops the duration timer, cancels the run context and
-// deregisters the handle.
+// runAgent executes an accepted agent run for the workspace on coord, the
+// coordinator that accepted it. It owns the accept reservation (releasing
+// it on return), the runWG ticket added by SendMessage, and the run handle
+// SendMessage registered: the deferred end() stops the duration timer,
+// cancels the run context and deregisters the handle.
 //
 // Because that ownership ends when this function returns, it must not
 // return before the run has actually run. A prompt dispatched into a
@@ -118,7 +119,7 @@ func (b *Backend) SendMessage(workspaceID string, msg proto.AgentMessage) error 
 // out from under it by a client that exited; and the turn it runs, not
 // the workspace, is what decides whether interactive tools and the
 // MCP-initialization wait apply, and which model streams.
-func (b *Backend) runAgent(ws *Workspace, msg proto.AgentMessage, accept *agent.AcceptedRun, run *runHandle) {
+func (b *Backend) runAgent(ws *Workspace, coord agent.Coordinator, msg proto.AgentMessage, accept *agent.AcceptedRun, run *runHandle) {
 	defer ws.runWG.Done()
 	defer accept.Close()
 	defer ws.end(run)
@@ -146,7 +147,7 @@ func (b *Backend) runAgent(ws *Workspace, msg proto.AgentMessage, accept *agent.
 	if msg.Channel != "" {
 		ctx = agent.WithChannel(ctx, msg.Channel)
 	}
-	_, err := ws.AgentCoordinator.RunAccepted(ctx, accept, msg.SessionID, msg.Prompt, proto.AttachmentsToMessage(msg.Attachments)...)
+	_, err := coord.RunAccepted(ctx, accept, msg.SessionID, msg.Prompt, proto.AttachmentsToMessage(msg.Attachments)...)
 	if err == nil || errors.Is(err, context.Canceled) {
 		return
 	}
@@ -209,29 +210,72 @@ func (b *Backend) GetAgentInfo(workspaceID string) (proto.AgentInfo, error) {
 	}
 
 	var agentInfo proto.AgentInfo
-	if ws.AgentCoordinator != nil {
-		m := ws.AgentCoordinator.Model()
+	if coord := ws.Coordinator(); coord != nil {
+		m := coord.Model()
 		agentInfo = proto.AgentInfo{
 			Model:    m.CatwalkCfg,
 			ModelCfg: m.ModelCfg,
-			IsBusy:   ws.AgentCoordinator.IsBusy(),
+			IsBusy:   coord.IsBusy(),
 			IsReady:  true,
 		}
 	}
 	return agentInfo, nil
 }
 
+// Coordinator returns the workspace's agent coordinator, or nil when it
+// has not been created yet.
+func (w *Workspace) Coordinator() agent.Coordinator {
+	if w.App == nil {
+		return nil
+	}
+	w.agentMu.RLock()
+	defer w.agentMu.RUnlock()
+	return w.AgentCoordinator
+}
+
+// initAgent creates the workspace's coder agent coordinator when it does
+// not exist yet and reports whether this call created it. An existing
+// coordinator is never replaced: every client of the workspace shares it,
+// and a new one would not know the runs, queues and cancels of the old one.
+// One coordinator can serve every client because whether a run is
+// interactive is a property of the run (agent.WithNonInteractive), not of
+// the coordinator. Creating it is refused once the workspace is closing,
+// so every write of the coordinator happens before [Workspace.Shutdown]
+// reads it.
+func (w *Workspace) initAgent(ctx context.Context) (bool, error) {
+	if w.Coordinator() != nil {
+		return false, nil
+	}
+	w.agentMu.Lock()
+	defer w.agentMu.Unlock()
+	if w.AgentCoordinator != nil {
+		return false, nil
+	}
+	w.runMu.Lock()
+	closing := w.closing
+	w.runMu.Unlock()
+	if closing {
+		return false, ErrWorkspaceClosing
+	}
+	return true, w.InitCoderAgent(ctx)
+}
+
 // InitAgent makes sure the workspace has a coder agent. A workspace
 // keeps the coordinator it already has, so a second attach or a client
 // reconnect cannot strand runs that are already in flight; see
-// app.InitCoderAgent.
+// app.InitCoderAgent. A kept coordinator only has its models and tools
+// refreshed from the current config.
 func (b *Backend) InitAgent(ctx context.Context, workspaceID string) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
 
-	return ws.InitCoderAgent(ctx)
+	created, err := ws.initAgent(ctx)
+	if err != nil || created {
+		return err
+	}
+	return ws.Coordinator().UpdateModels(ctx)
 }
 
 // UpdateAgent reloads the agent model configuration.
@@ -241,7 +285,11 @@ func (b *Backend) UpdateAgent(ctx context.Context, workspaceID string) error {
 		return err
 	}
 
-	return ws.UpdateAgentModel(ctx)
+	coord := ws.Coordinator()
+	if coord == nil {
+		return errors.New("agent configuration is missing")
+	}
+	return coord.UpdateModels(ctx)
 }
 
 // SetMainAgent switches the workspace's active agent (coder or plan). It
@@ -254,15 +302,16 @@ func (b *Backend) SetMainAgent(workspaceID, agentID string) error {
 		return err
 	}
 
-	if ws.AgentCoordinator == nil {
+	coord := ws.Coordinator()
+	if coord == nil {
 		return ErrAgentNotInitialized
 	}
 
-	if ws.AgentCoordinator.IsBusy() {
+	if coord.IsBusy() {
 		return ErrAgentBusy
 	}
 
-	return ws.AgentCoordinator.SetMainAgent(agentID)
+	return coord.SetMainAgent(agentID)
 }
 
 // CancelSession cancels an ongoing agent operation for the given
@@ -273,8 +322,8 @@ func (b *Backend) CancelSession(workspaceID, sessionID string) error {
 		return err
 	}
 
-	if ws.AgentCoordinator != nil {
-		ws.AgentCoordinator.Cancel(sessionID)
+	if coord := ws.Coordinator(); coord != nil {
+		coord.Cancel(sessionID)
 	}
 	return nil
 }
@@ -286,11 +335,12 @@ func (b *Backend) SummarizeSession(ctx context.Context, workspaceID, sessionID s
 		return err
 	}
 
-	if ws.AgentCoordinator == nil {
+	coord := ws.Coordinator()
+	if coord == nil {
 		return ErrAgentNotInitialized
 	}
 
-	return ws.AgentCoordinator.Summarize(ctx, sessionID)
+	return coord.Summarize(ctx, sessionID)
 }
 
 // QueuedPrompts returns the number of queued prompts for the session.
@@ -300,29 +350,44 @@ func (b *Backend) QueuedPrompts(workspaceID, sessionID string) (int, error) {
 		return 0, err
 	}
 
-	if ws.AgentCoordinator == nil {
+	coord := ws.Coordinator()
+	if coord == nil {
 		return 0, nil
 	}
 
-	return ws.AgentCoordinator.QueuedPrompts(sessionID), nil
+	return coord.QueuedPrompts(sessionID), nil
 }
 
 // ClearQueue clears the prompt queue for the session and returns the
-// messages it removed, oldest to newest, so a caller can restore them
-// instead of losing them. A workspace with no coordinator has no queue,
-// so it reports an empty drain rather than an error — the same shape
-// PopQueuedMessage uses.
+// user's prompts it removed, oldest to newest, so a caller can restore
+// them instead of losing them; subagent reports go to the transcript. A
+// workspace with no coordinator has no queue, so it reports an empty drain
+// rather than an error — the same shape PopQueuedMessage uses.
 func (b *Backend) ClearQueue(workspaceID, sessionID string) ([]agent.QueuedMessage, error) {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return nil, err
 	}
 
-	if ws.AgentCoordinator == nil {
-		return nil, nil
+	if coord := ws.Coordinator(); coord != nil {
+		return coord.ClearQueue(sessionID), nil
+	}
+	return nil, nil
+}
+
+// AddNote keeps text for the session's next prompt. It does not start a run.
+func (b *Backend) AddNote(workspaceID, sessionID, text string) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
 	}
 
-	return ws.AgentCoordinator.ClearQueue(sessionID), nil
+	coord := ws.Coordinator()
+	if coord == nil {
+		return ErrAgentNotInitialized
+	}
+	coord.AddNote(sessionID, text)
+	return nil
 }
 
 // QueuedPromptsList returns the list of queued prompt strings for a
@@ -333,14 +398,15 @@ func (b *Backend) QueuedPromptsList(workspaceID, sessionID string) ([]string, er
 		return nil, err
 	}
 
-	if ws.AgentCoordinator == nil {
+	coord := ws.Coordinator()
+	if coord == nil {
 		return nil, nil
 	}
 
-	return ws.AgentCoordinator.QueuedPromptsList(sessionID), nil
+	return coord.QueuedPromptsList(sessionID), nil
 }
 
-// PopQueuedMessage removes and returns the newest queued message for a
+// PopQueuedMessage removes and returns the newest queued user prompt for a
 // session. A workspace with no coordinator has no queue, so it reports
 // an empty pop rather than an error.
 func (b *Backend) PopQueuedMessage(workspaceID, sessionID string) (agent.QueuedMessage, bool, error) {
@@ -349,11 +415,12 @@ func (b *Backend) PopQueuedMessage(workspaceID, sessionID string) (agent.QueuedM
 		return agent.QueuedMessage{}, false, err
 	}
 
-	if ws.AgentCoordinator == nil {
+	coord := ws.Coordinator()
+	if coord == nil {
 		return agent.QueuedMessage{}, false, nil
 	}
 
-	queued, ok := ws.AgentCoordinator.PopQueuedMessage(sessionID)
+	queued, ok := coord.PopQueuedMessage(sessionID)
 	return queued, ok, nil
 }
 

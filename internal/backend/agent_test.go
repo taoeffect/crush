@@ -99,10 +99,14 @@ func (c *blockingCoordinator) PopQueuedMessage(string) (agent.QueuedMessage, boo
 	return agent.QueuedMessage{}, false
 }
 
+func (c *blockingCoordinator) AddNote(string, string)                        {}
 func (c *blockingCoordinator) Summarize(context.Context, string) error       { return nil }
 func (c *blockingCoordinator) Model() agent.Model                            { return agent.Model{} }
 func (c *blockingCoordinator) UpdateModels(context.Context) error            { return nil }
 func (c *blockingCoordinator) GenerateTitle(context.Context, string, string) {}
+func (c *blockingCoordinator) SetHostContext(proto.HostContext)              {}
+func (c *blockingCoordinator) HostContext() proto.HostContext                { return proto.HostContext{} }
+
 func (c *blockingCoordinator) SetMainAgent(agentName string) error {
 	c.lastMainAgentSet.Store(agentName)
 	return c.setMainAgentErr
@@ -237,9 +241,18 @@ func TestSendMessage_AgentNotInitialized(t *testing.T) {
 func TestSendMessage_EmptyPrompt(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBackend(t)
-	ws := insertAgentWorkspace(t, b, newBlockingCoordinator())
+	coord := newBlockingCoordinator()
+	close(coord.release)
+	ws := insertAgentWorkspace(t, b, coord)
 	err := b.SendMessage(ws.ID, proto.AgentMessage{SessionID: "S1", Prompt: ""})
 	require.ErrorIs(t, err, agent.ErrEmptyPrompt)
+
+	// A blank prompt is valid only when a text attachment supplies input.
+	msg := proto.AgentMessage{SessionID: "S1", Prompt: " \t\r\n\u2003"}
+	err = b.SendMessage(ws.ID, msg)
+	require.ErrorIs(t, err, agent.ErrEmptyPrompt)
+	msg.Attachments = []proto.Attachment{{MimeType: "text/plain", Content: []byte("attached text")}}
+	require.NoError(t, b.SendMessage(ws.ID, msg))
 }
 
 func TestSendMessage_SessionMissing(t *testing.T) {

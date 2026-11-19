@@ -1,7 +1,6 @@
 package shell
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"fmt"
@@ -21,30 +20,6 @@ const (
 	CompletedJobRetention = 8 * time.Hour
 )
 
-// syncBuffer is a thread-safe wrapper around bytes.Buffer.
-type syncBuffer struct {
-	buf bytes.Buffer
-	mu  sync.RWMutex
-}
-
-func (sb *syncBuffer) Write(p []byte) (n int, err error) {
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	return sb.buf.Write(p)
-}
-
-func (sb *syncBuffer) WriteString(s string) (n int, err error) {
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	return sb.buf.WriteString(s)
-}
-
-func (sb *syncBuffer) String() string {
-	sb.mu.RLock()
-	defer sb.mu.RUnlock()
-	return sb.buf.String()
-}
-
 // BackgroundShell represents a shell running in the background.
 type BackgroundShell struct {
 	ID          string
@@ -52,10 +27,11 @@ type BackgroundShell struct {
 	Description string
 	Shell       *Shell
 	WorkingDir  string
+	owner       any // Who started the shell, for KillOwned
 	ctx         context.Context
 	cancel      context.CancelFunc
-	stdout      *syncBuffer
-	stderr      *syncBuffer
+	stdout      *cappedBuffer
+	stderr      *cappedBuffer
 	done        chan struct{}
 	exitErr     error
 	completedAt atomic.Int64 // Unix timestamp when job completed (0 if still running)
@@ -87,8 +63,11 @@ func GetBackgroundShellManager() *BackgroundShellManager {
 }
 
 // Start creates and starts a new background shell with the given command,
-// unless maxJobs jobs are already running.
-func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, command, description string, maxJobs int) (*BackgroundShell, error) {
+// unless maxJobs jobs are already running. The shell is tagged with owner, a
+// comparable value identifying who started it, so that
+// [BackgroundShellManager.KillOwned] can stop it with that owner's other
+// shells.
+func (m *BackgroundShellManager) Start(ctx context.Context, owner any, workingDir string, blockFuncs []BlockFunc, command, description string, maxJobs int) (*BackgroundShell, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -111,10 +90,11 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 		Description: description,
 		WorkingDir:  workingDir,
 		Shell:       shell,
+		owner:       owner,
 		ctx:         shellCtx,
 		cancel:      cancel,
-		stdout:      &syncBuffer{},
-		stderr:      &syncBuffer{},
+		stdout:      newCappedBuffer(maxKeptOutput),
+		stderr:      newCappedBuffer(maxKeptOutput),
 		done:        make(chan struct{}),
 	}
 
@@ -219,6 +199,29 @@ func (m *BackgroundShellManager) KillAll(ctx context.Context) {
 	m.shells = map[string]*BackgroundShell{}
 	m.mu.Unlock()
 
+	killShells(ctx, shells)
+}
+
+// KillOwned terminates the background shells started on behalf of owner,
+// leaving every other owner's shells running. The provided context bounds
+// how long the function waits for each shell to exit.
+func (m *BackgroundShellManager) KillOwned(ctx context.Context, owner any) {
+	m.mu.Lock()
+	shells := map[string]*BackgroundShell{}
+	for id, shell := range m.shells {
+		if shell.owner == owner {
+			shells[id] = shell
+			delete(m.shells, id)
+		}
+	}
+	m.mu.Unlock()
+
+	killShells(ctx, shells)
+}
+
+// killShells cancels the given shells and waits for each to exit, or for
+// ctx to be done.
+func killShells(ctx context.Context, shells map[string]*BackgroundShell) {
 	var wg sync.WaitGroup
 	for _, shell := range shells {
 		wg.Go(func() {
@@ -250,6 +253,11 @@ func (bs *BackgroundShell) IsDone() bool {
 	default:
 		return false
 	}
+}
+
+// Done returns a channel that is closed when the background shell exits.
+func (bs *BackgroundShell) Done() <-chan struct{} {
+	return bs.done
 }
 
 // Wait blocks until the background shell completes.

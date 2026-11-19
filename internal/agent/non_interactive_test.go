@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -41,8 +41,9 @@ func (m *toolPaletteModel) Stream(ctx context.Context, call fantasy.Call) (fanta
 // would block until the run's context died, and `crush run` would look
 // hung. It must not be offered new_session either: the handoff that tool
 // asks for is performed by the TUI, so a headless turn would end its own
-// session with nothing to continue it. An ordinary run must still get
-// both.
+// session with nothing to continue it. Nor agent_dispatch: a headless run
+// exits before the subagent's report could arrive. An ordinary run must
+// still get all three.
 func TestRun_NonInteractiveTurnWithholdsInteractiveTools(t *testing.T) {
 	t.Parallel()
 
@@ -72,6 +73,13 @@ func TestRun_NonInteractiveTurnWithholdsInteractiveTools(t *testing.T) {
 				Tools: []fantasy.AgentTool{
 					tools.NewQuestionTool(question.NewService()),
 					tools.NewNewSessionTool(true, true),
+					fantasy.NewAgentTool(
+						AgentDispatchToolName,
+						"Stands in for the dispatch tool.",
+						func(context.Context, echoToolParams, fantasy.ToolCall) (fantasy.ToolResponse, error) {
+							return fantasy.NewTextResponse(""), nil
+						},
+					),
 				},
 				Permissions: env.permissions,
 			}).(*sessionAgent)
@@ -89,12 +97,16 @@ func TestRun_NonInteractiveTurnWithholdsInteractiveTools(t *testing.T) {
 					"an interactive run must still be able to ask the user")
 				require.Contains(t, names, tools.NewSessionToolName,
 					"an interactive run must still be able to hand off to a new session")
+				require.Contains(t, names, AgentDispatchToolName,
+					"an interactive run must still be able to delegate detached")
 				return
 			}
 			require.NotContains(t, names, tools.QuestionToolName,
 				"a run with nobody to answer must not be offered the question tool")
 			require.NotContains(t, names, tools.NewSessionToolName,
 				"a run with no TUI to perform the handoff must not be offered new_session")
+			require.NotContains(t, names, AgentDispatchToolName,
+				"a run that exits before a report could arrive must not be offered agent_dispatch")
 		})
 	}
 }

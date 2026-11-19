@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 )
@@ -62,7 +62,7 @@ func (r *realCopilotModelsClient) Get(ctx context.Context) (catwalk.Provider, er
 	result = catwalk.Provider{
 		ID:          catwalk.InferenceProviderCopilot,
 		APIEndpoint: baseURL,
-		Type:        catwalk.TypeOpenAICompat,
+		Type:        catwalk.TypeCompletions,
 		Models:      copilotModelsToCatwalkModels(models),
 	}
 	return result, nil
@@ -143,14 +143,20 @@ func copilotModelsToCatwalkModels(response copilotModelsResponse) []catwalk.Mode
 		}
 		seen[model.ID] = true
 		reasoningLevels := model.Capabilities.Supports.ReasoningEffort
+		reasoning := catwalk.Reasoning{Thinking: catwalk.ThinkingNever}
+		if model.Capabilities.Supports.AdaptiveThinking || len(reasoningLevels) > 0 {
+			reasoning.Thinking = catwalk.ThinkingToggleable
+			if len(reasoningLevels) > 0 {
+				reasoning.EffortLevels = catwalk.NewEffortLevels(reasoningLevels...)
+			}
+		}
 		models = append(models, catwalk.Model{
 			ID:               model.ID,
 			Name:             model.Name,
 			ContextWindow:    model.Capabilities.Limits.MaxContextWindowTokens,
 			DefaultMaxTokens: model.Capabilities.Limits.MaxOutputTokens,
-			CanReason:        model.Capabilities.Supports.AdaptiveThinking || len(reasoningLevels) > 0,
-			ReasoningLevels:  reasoningLevels,
-			SupportsImages:   model.Capabilities.Supports.Vision,
+			Reasoning:        reasoning,
+			Capabilities:     catwalk.Capabilities{Vision: model.Capabilities.Supports.Vision},
 		})
 	}
 

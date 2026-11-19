@@ -63,3 +63,4 @@ completions/crush.*sh
 /.claude/
 /CLAUDE.md
 /.omp/
+/docs-site

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 
 	"github.com/stretchr/testify/require"
@@ -74,7 +74,7 @@ func TestSharedOwnership_ChildSessionIsVisibleToItsSiblings(t *testing.T) {
 		t.Fatal("sub-agent run never entered Stream")
 	}
 
-	require.True(t, coder.IsSessionBusy(sess.ID),
+	require.True(t, coder.HasActiveTurn(sess.ID),
 		"a turn running on a sibling agent must still make its session busy")
 
 	// The sibling's cancel must reach the run, which is what makes
@@ -85,7 +85,7 @@ func TestSharedOwnership_ChildSessionIsVisibleToItsSiblings(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancel from a sibling agent never reached the running turn")
 	}
-	require.False(t, coder.IsSessionBusy(sess.ID))
+	require.False(t, coder.HasActiveTurn(sess.ID))
 }
 
 // TestSharedOwnership_PromptIntoABusyChildSessionQueues covers the other

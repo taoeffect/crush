@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/message"
@@ -331,7 +331,7 @@ func TestRun_LostToolResultOnEarlierStepIsRepaired(t *testing.T) {
 	// appended after the second step's assistant message, so the next
 	// prompt is only valid if the answer is paired with its call rather
 	// than sent from where it was stored.
-	history, _ := sa.preparePrompt(msgs, true)
+	history, _ := sa.preparePrompt(msgs, true, false)
 	requireAdjacentToolResult(t, history, "call-1")
 }
 
@@ -423,7 +423,7 @@ func TestRun_TruncatedTurnStillRunsQueuedPrompt(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the first run never entered Stream")
 	}
-	require.True(t, sa.IsSessionBusy(sess.ID))
+	require.True(t, sa.HasActiveTurn(sess.ID))
 
 	res, err := sa.Run(t.Context(), SessionAgentCall{
 		SessionID: sess.ID,

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -18,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/discover"
@@ -35,9 +36,212 @@ import (
 
 const defaultCatwalkURL = "https://catwalk.charm.land"
 
+// legacyProviderTypes maps provider type values from the catwalk v2
+// schema onto the v3 endpoint types that describe the same API format, so
+// configs written before the migration keep working. Custom provider
+// types with registered enrichers (ollama, litellm, ...) are not listed
+// here and pass through unchanged.
+var legacyProviderTypes = map[catwalk.Type]catwalk.Type{
+	"openai":        catwalk.TypeResponses,
+	"openai-compat": catwalk.TypeCompletions,
+	"openrouter":    catwalk.TypeCompletions,
+	"vercel":        catwalk.TypeCompletions,
+	"anthropic":     catwalk.TypeMessages,
+	"azure":         catwalk.TypeResponses,
+	"bedrock":       catwalk.TypeMessages,
+	"google":        catwalk.TypeCompletions,
+	"google-vertex": catwalk.TypeCompletions,
+}
+
+// NormalizeProviderType maps a catwalk v2 provider type onto the v3
+// endpoint type describing the same API format. Types that are already
+// v3 or are not legacy names pass through unchanged. catwalk's v3 data
+// still carries v2 names for some providers (OpenAI, MiniMax, ...).
+func NormalizeProviderType(t catwalk.Type) catwalk.Type {
+	if mapped, ok := legacyProviderTypes[t]; ok {
+		return mapped
+	}
+	return t
+}
+
+// legacyModelPricingFields maps catwalk v2 model cost fields onto their
+// v3 pricing counterparts.
+var legacyModelPricingFields = map[string]string{
+	"cost_per_1m_in":         "input",
+	"cost_per_1m_out":        "output",
+	"cost_per_1m_in_cached":  "cache_create",
+	"cost_per_1m_out_cached": "cache_hit",
+}
+
+// migrateCatwalkV2 rewrites a merged user config from the catwalk v2
+// schema onto the v3 schema so pre-migration configs decode correctly.
+// In v3, flat model fields moved into nested structures: the cost
+// fields became pricing, supports_attachments became
+// capabilities.vision, and the can_reason/reasoning_levels/
+// default_reasoning_effort trio became the reasoning object. The
+// rewrite is pure and is a no-op for configs already written with v3
+// fields; use migrateCatwalkV2File to persist the result.
+func migrateCatwalkV2(data []byte) ([]byte, bool) {
+	var root map[string]any
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&root); err != nil {
+		return data, false
+	}
+	providers, ok := root["providers"].(map[string]any)
+	if !ok {
+		return data, false
+	}
+
+	changed := false
+	for _, raw := range providers {
+		provider, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"models", "chatgpt_models"} {
+			models, ok := provider[key].([]any)
+			if !ok {
+				continue
+			}
+			for i, rawModel := range models {
+				model, ok := rawModel.(map[string]any)
+				if !ok {
+					continue
+				}
+				if migrateCatwalkV2Model(model) {
+					models[i] = model
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return data, false
+	}
+
+	out, err := json.Marshal(root)
+	if err != nil {
+		return data, false
+	}
+	return out, true
+}
+
+// migrateCatwalkV2File migrates a JSON config file from the catwalk v2
+// model schema onto v3 and persists the rewrite atomically, preserving
+// the file's permissions. The returned bytes are always the migrated
+// form, so loading continues even when the write fails.
+func migrateCatwalkV2File(path string, data []byte) []byte {
+	migrated, changed := migrateCatwalkV2(data)
+	if !changed {
+		return data
+	}
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	if err := atomicWriteFile(path, migrated, perm); err != nil {
+		slog.Warn("Failed to write migrated config", "path", path, "error", err)
+	} else {
+		slog.Info("Migrated config file to the catwalk v3 model schema", "path", path)
+	}
+	return migrated
+}
+
+// migrateCatwalkV2Model migrates a single model object in place and
+// reports whether anything changed. Legacy fields are removed after
+// being folded into their v3 counterparts so they never leak back into
+// the decoded config.
+func migrateCatwalkV2Model(model map[string]any) bool {
+	changed := false
+
+	if _, ok := model["pricing"]; !ok {
+		pricing := map[string]any{}
+		for legacy, field := range legacyModelPricingFields {
+			value, ok := model[legacy]
+			if !ok {
+				continue
+			}
+			pricing[field] = value
+			delete(model, legacy)
+			changed = true
+		}
+		if len(pricing) > 0 {
+			model["pricing"] = pricing
+		}
+	} else {
+		for legacy := range legacyModelPricingFields {
+			if _, ok := model[legacy]; ok {
+				delete(model, legacy)
+				changed = true
+			}
+		}
+	}
+
+	if value, ok := model["supports_attachments"]; ok {
+		delete(model, "supports_attachments")
+		capabilities, ok := model["capabilities"].(map[string]any)
+		if !ok {
+			capabilities = map[string]any{}
+			model["capabilities"] = capabilities
+		}
+		if _, ok := capabilities["vision"]; !ok {
+			capabilities["vision"] = value
+		}
+		changed = true
+	}
+
+	canReason, hasCanReason := model["can_reason"]
+	levels, hasLevels := model["reasoning_levels"]
+	defaultEffort, hasDefaultEffort := model["default_reasoning_effort"]
+	for _, legacy := range []string{"can_reason", "reasoning_levels", "default_reasoning_effort"} {
+		if _, ok := model[legacy]; ok {
+			delete(model, legacy)
+			changed = true
+		}
+	}
+	if _, ok := model["reasoning"]; !ok && (hasCanReason || hasLevels || hasDefaultEffort) {
+		reasoning := map[string]any{}
+		if can, ok := canReason.(bool); ok && !can {
+			reasoning["thinking"] = catwalk.ThinkingNever
+		} else {
+			reasoning["thinking"] = catwalk.ThinkingToggleable
+			if raw, ok := levels.([]any); ok && len(raw) > 0 {
+				values := make([]string, 0, len(raw))
+				for _, level := range raw {
+					if value, ok := level.(string); ok {
+						values = append(values, value)
+					}
+				}
+				if len(values) > 0 {
+					effortLevels := make([]any, 0, len(values))
+					for _, level := range catwalk.NewEffortLevels(values...) {
+						effortLevels = append(effortLevels, map[string]any{
+							"value":   level.Value,
+							"display": level.Display,
+						})
+					}
+					reasoning["effort_levels"] = effortLevels
+					if effort, ok := defaultEffort.(string); ok && effort != "" {
+						reasoning["default_effort_level"] = effort
+					}
+				}
+			}
+		}
+		model["reasoning"] = reasoning
+	}
+
+	return changed
+}
+
 // Load loads the configuration from the default paths and returns a
 // ConfigStore that owns both the pure-data Config and all runtime state.
 func Load(ctx context.Context, workingDir, dataDir string, debug bool) (*ConfigStore, error) {
+	// The CRUSH_DATA_DIR env var overrides the per-project data directory
+	// when no --data-dir flag is given. Relative paths resolve against the
+	// working directory, like the data_directory config option.
+	dataDir = cmp.Or(dataDir, os.Getenv("CRUSH_DATA_DIR"))
+
 	// Migrate deprecated disable_notifications before loading config.
 	migrateDisableNotifications()
 
@@ -79,7 +283,11 @@ func Load(ctx context.Context, workingDir, dataDir string, debug bool) (*ConfigS
 		return nil, fmt.Errorf("invalid hook configuration: %w", err)
 	}
 
-	if !isInsideWorktree() {
+	if err := cfg.ValidatePrompts(); err != nil {
+		return nil, fmt.Errorf("invalid prompt configuration: %w", err)
+	}
+
+	if !isInsideWorktree(workingDir) {
 		const depth = 2
 		const items = 100
 		slog.Warn("No git repository detected in working directory, will limit file walk operations", "depth", depth, "items", items)
@@ -132,7 +340,7 @@ func Load(ctx context.Context, workingDir, dataDir string, debug bool) (*ConfigS
 
 	env := env.New()
 	// Configure providers
-	valueResolver := NewShellVariableResolver(env)
+	valueResolver := NewShellVariableResolver(env, WithWorkingDir(workingDir))
 	store.resolver = valueResolver
 
 	// Hold writeMu during initial load to prevent configureProviders
@@ -209,6 +417,7 @@ func loadWorkspaceOverride(cfg *Config, wsData []byte, workingDir, dataDir, path
 	if !json.Valid(wsData) {
 		return nil, fmt.Errorf("invalid JSON in config file %s", path)
 	}
+	wsData = migrateCatwalkV2File(path, wsData)
 	merged, err := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
 	if err != nil {
 		return nil, err
@@ -443,8 +652,10 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 		// Make sure the provider ID is set.
 		providerConfig.ID = id
 		providerConfig.Name = cmp.Or(providerConfig.Name, id) // Use ID as name if not set
-		// Default to OpenAI if not set.
-		providerConfig.Type = cmp.Or(providerConfig.Type, catwalk.TypeOpenAICompat)
+		// Migrate legacy provider types onto the catwalk v3 endpoint types.
+		providerConfig.Type = NormalizeProviderType(providerConfig.Type)
+		// Default to OpenAI chat completions if not set.
+		providerConfig.Type = cmp.Or(providerConfig.Type, catwalk.TypeCompletions)
 		if !slices.Contains(catwalk.KnownProviderTypes(), providerConfig.Type) &&
 			providerConfig.Type != hyper.Name &&
 			!discover.IsKnownCustomProvider(string(providerConfig.Type)) {
@@ -727,7 +938,7 @@ func (c *Config) defaultModelSelection(knownProviders []catwalk.Provider) (large
 			Provider:        string(p.ID),
 			Model:           defaultLargeModel.ID,
 			MaxTokens:       defaultLargeModel.DefaultMaxTokens,
-			ReasoningEffort: defaultLargeModel.DefaultReasoningEffort,
+			ReasoningEffort: defaultLargeModel.Reasoning.DefaultEffortLevel,
 		}
 
 		defaultSmallModel := c.GetModel(string(p.ID), p.DefaultSmallModelID)
@@ -742,7 +953,7 @@ func (c *Config) defaultModelSelection(knownProviders []catwalk.Provider) (large
 			Provider:        string(p.ID),
 			Model:           defaultSmallModel.ID,
 			MaxTokens:       defaultSmallModel.DefaultMaxTokens,
-			ReasoningEffort: defaultSmallModel.DefaultReasoningEffort,
+			ReasoningEffort: defaultSmallModel.Reasoning.DefaultEffortLevel,
 		}
 		return largeModel, smallModel, err
 	}
@@ -801,92 +1012,11 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 
 	largeModelSelected, largeModelConfigured := cfg.Models[SelectedModelTypeLarge]
 	if largeModelConfigured {
-		if largeModelSelected.Model != "" {
-			large.Model = largeModelSelected.Model
-		}
-		if largeModelSelected.Provider != "" {
-			large.Provider = largeModelSelected.Provider
-		}
-		model := cfg.GetModel(large.Provider, large.Model)
-		if model == nil {
-			large = defaultLarge
-			result.LargeFallback = true
-		} else {
-			if largeModelSelected.MaxTokens > 0 {
-				large.MaxTokens = largeModelSelected.MaxTokens
-			} else {
-				large.MaxTokens = model.DefaultMaxTokens
-			}
-			if largeModelSelected.ReasoningEffort != "" {
-				large.ReasoningEffort = largeModelSelected.ReasoningEffort
-			} else {
-				large.ReasoningEffort = model.DefaultReasoningEffort
-			}
-			large.Think = largeModelSelected.Think
-			if largeModelSelected.Temperature != nil {
-				large.Temperature = largeModelSelected.Temperature
-			}
-			if largeModelSelected.TopP != nil {
-				large.TopP = largeModelSelected.TopP
-			}
-			if largeModelSelected.TopK != nil {
-				large.TopK = largeModelSelected.TopK
-			}
-			if largeModelSelected.FrequencyPenalty != nil {
-				large.FrequencyPenalty = largeModelSelected.FrequencyPenalty
-			}
-			if largeModelSelected.PresencePenalty != nil {
-				large.PresencePenalty = largeModelSelected.PresencePenalty
-			}
-			if largeModelSelected.ProviderOptions != nil {
-				large.ProviderOptions = maps.Clone(largeModelSelected.ProviderOptions)
-			}
-		}
+		large, result.LargeFallback = applySelection(cfg, defaultLarge, largeModelSelected)
 	}
-	smallModelSelected, smallModelConfigured := cfg.Models[SelectedModelTypeSmall]
+	_, smallModelConfigured := cfg.Models[SelectedModelTypeSmall]
 	if smallModelConfigured {
-		if smallModelSelected.Model != "" {
-			small.Model = smallModelSelected.Model
-		}
-		if smallModelSelected.Provider != "" {
-			small.Provider = smallModelSelected.Provider
-		}
-
-		model := cfg.GetModel(small.Provider, small.Model)
-		if model == nil {
-			small = defaultSmall
-			result.SmallFallback = true
-		} else {
-			if smallModelSelected.MaxTokens > 0 {
-				small.MaxTokens = smallModelSelected.MaxTokens
-			} else {
-				small.MaxTokens = model.DefaultMaxTokens
-			}
-			if smallModelSelected.ReasoningEffort != "" {
-				small.ReasoningEffort = smallModelSelected.ReasoningEffort
-			} else {
-				small.ReasoningEffort = model.DefaultReasoningEffort
-			}
-			if smallModelSelected.Temperature != nil {
-				small.Temperature = smallModelSelected.Temperature
-			}
-			if smallModelSelected.TopP != nil {
-				small.TopP = smallModelSelected.TopP
-			}
-			if smallModelSelected.TopK != nil {
-				small.TopK = smallModelSelected.TopK
-			}
-			if smallModelSelected.FrequencyPenalty != nil {
-				small.FrequencyPenalty = smallModelSelected.FrequencyPenalty
-			}
-			if smallModelSelected.PresencePenalty != nil {
-				small.PresencePenalty = smallModelSelected.PresencePenalty
-			}
-			if smallModelSelected.ProviderOptions != nil {
-				small.ProviderOptions = maps.Clone(smallModelSelected.ProviderOptions)
-			}
-			small.Think = smallModelSelected.Think
-		}
+		small, result.SmallFallback = applySelection(cfg, defaultSmall, cfg.Models[SelectedModelTypeSmall])
 	}
 
 	// When small isn't explicitly configured and the provider isn't a
@@ -910,6 +1040,48 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 	result.Large = large
 	result.Small = small
 	return result, nil
+}
+
+// applySelection overlays a configured selection onto def. It reports a
+// fallback, returning def unchanged, when the selection names no known model.
+func applySelection(cfg *Config, def, sel SelectedModel) (SelectedModel, bool) {
+	out := def
+	out.Model = cmp.Or(sel.Model, def.Model)
+	out.Provider = cmp.Or(sel.Provider, def.Provider)
+	model := cfg.GetModel(out.Provider, out.Model)
+	if model == nil {
+		return def, true
+	}
+
+	out.MaxTokens = model.DefaultMaxTokens
+	if sel.MaxTokens > 0 {
+		out.MaxTokens = sel.MaxTokens
+	}
+
+	// A selection layered over another model's can hold reasoning options
+	// this one rejects, so they only apply to a model that reasons.
+	out.ReasoningEffort, out.Think = "", false
+	if model.CanReason() {
+		out.ReasoningEffort = cmp.Or(sel.ReasoningEffort, model.Reasoning.DefaultEffortLevel)
+		out.Think = sel.Think
+	} else if sel.Think || sel.ReasoningEffort != "" {
+		slog.Warn(
+			"Ignoring reasoning options for a model that does not declare reasoning support",
+			"provider", out.Provider,
+			"model", out.Model,
+			"hint", `set "reasoning": {"thinking": "toggleable"} on the model if it reasons`,
+		)
+	}
+
+	out.Temperature = cmp.Or(sel.Temperature, out.Temperature)
+	out.TopP = cmp.Or(sel.TopP, out.TopP)
+	out.TopK = cmp.Or(sel.TopK, out.TopK)
+	out.FrequencyPenalty = cmp.Or(sel.FrequencyPenalty, out.FrequencyPenalty)
+	out.PresencePenalty = cmp.Or(sel.PresencePenalty, out.PresencePenalty)
+	if sel.ProviderOptions != nil {
+		out.ProviderOptions = maps.Clone(sel.ProviderOptions)
+	}
+	return out, false
 }
 
 // lookupConfigs searches config files starting at cwd and walking up
@@ -988,6 +1160,7 @@ func loadFromConfigPaths(ctx context.Context, configPaths []string) (*Config, []
 				if !json.Valid(jsonBytes) {
 					return nil, nil, fmt.Errorf("shell config %s produced invalid JSON", path)
 				}
+				jsonBytes = anchorPromptPaths(jsonBytes, dir)
 				addTopLevelKeys(shDirKeys, dir, jsonBytes)
 				configs = append(configs, jsonBytes)
 				loaded = append(loaded, path)
@@ -996,6 +1169,8 @@ func loadFromConfigPaths(ctx context.Context, configPaths []string) (*Config, []
 			if !json.Valid(data) {
 				return nil, nil, fmt.Errorf("invalid JSON in config file %s", path)
 			}
+			data = migrateCatwalkV2File(path, data)
+			data = anchorPromptPaths(data, dir)
 			addTopLevelKeys(jsonDirKeys, dir, data)
 			configs = append(configs, data)
 			loaded = append(loaded, path)
@@ -1030,6 +1205,29 @@ func loadFromConfigPaths(ctx context.Context, configPaths []string) (*Config, []
 	return cfg, loaded, nil
 }
 
+// anchorPromptPaths makes the relative options.prompts paths in one config
+// file absolute against that file's directory, before the files merge and
+// lose track of where each path came from. Otherwise a relative path in the
+// global config would point at a different file in every project. Paths
+// starting with ~ or $ are left for expansion when the prompt is read.
+func anchorPromptPaths(data []byte, dir string) []byte {
+	gjson.GetBytes(data, "options.prompts").ForEach(func(name, path gjson.Result) bool {
+		p := path.String()
+		if p == "" || strings.HasPrefix(p, "~") || strings.HasPrefix(p, "$") || filepathext.SmartIsAbs(p) {
+			return true
+		}
+		abs, err := filepath.Abs(filepath.Join(dir, p))
+		if err != nil {
+			return true
+		}
+		if out, err := sjson.SetBytes(data, "options.prompts."+gjson.Escape(name.String()), abs); err == nil {
+			data = out
+		}
+		return true
+	})
+	return data
+}
+
 // addTopLevelKeys records the top-level JSON keys present in data into the
 // set for dir.
 func addTopLevelKeys(m map[string]map[string]bool, dir string, data []byte) {
@@ -1053,6 +1251,10 @@ func loadFromBytes(configs [][]byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Safety net for sources that cannot be rewritten on disk (e.g.
+	// crushrc builtins producing JSON): migrate the merged result in
+	// memory so decoding always sees the v3 schema.
+	data, _ = migrateCatwalkV2(data)
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
@@ -1268,12 +1470,17 @@ func assignIfNil[T any](ptr **T, val T) {
 	}
 }
 
-func isInsideWorktree() bool {
-	bts, err := exec.CommandContext(
+// isInsideWorktree reports whether dir is inside a git working tree. It
+// checks dir rather than the process working directory, which a server
+// shares across every workspace it hosts.
+func isInsideWorktree(dir string) bool {
+	cmd := exec.CommandContext(
 		context.Background(),
 		"git", "rev-parse",
 		"--is-inside-work-tree",
-	).CombinedOutput()
+	)
+	cmd.Dir = dir
+	bts, err := cmd.CombinedOutput()
 	return err == nil && strings.TrimSpace(string(bts)) == "true"
 }
 
@@ -1401,3 +1608,23 @@ func ProjectSkillsDir(workingDir string) []string {
 }
 
 func isAppleTerminal() bool { return os.Getenv("TERM_PROGRAM") == "Apple_Terminal" }
+
+// ValidatePrompts rejects prompt names that do not name a built-in prompt, so
+// a typo fails at startup instead of silently leaving the built-in in place.
+func (c *Config) ValidatePrompts() error {
+	if c.Options == nil {
+		return nil
+	}
+	return ValidatePromptNames(c.Options.Prompts)
+}
+
+// ValidatePromptNames rejects any key in prompts that is not a built-in
+// prompt name. Config files and the --prompt flag both go through it.
+func ValidatePromptNames(prompts PromptPaths) error {
+	for _, name := range slices.Sorted(maps.Keys(prompts)) {
+		if !slices.Contains(PromptNames, name) {
+			return fmt.Errorf("unknown prompt %q, expected one of %s", name, strings.Join(PromptNames, ", "))
+		}
+	}
+	return nil
+}

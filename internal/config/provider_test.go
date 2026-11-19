@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -293,7 +293,7 @@ func TestProviders_Integration_LiveOverlayRefreshesWithCredentialsInBackground(t
 			Name:                "Venice",
 			ID:                  catwalk.InferenceProviderVenice,
 			APIEndpoint:         server.URL,
-			Type:                catwalk.TypeOpenAICompat,
+			Type:                catwalk.TypeCompletions,
 			DefaultLargeModelID: "venice-live",
 			DefaultSmallModelID: "venice-live",
 			Models:              []catwalk.Model{{ID: "venice-seed", Name: "Venice Seed"}},
@@ -302,7 +302,7 @@ func TestProviders_Integration_LiveOverlayRefreshesWithCredentialsInBackground(t
 			Name:                "Copilot",
 			ID:                  catwalk.InferenceProviderCopilot,
 			APIEndpoint:         server.URL,
-			Type:                catwalk.TypeOpenAICompat,
+			Type:                catwalk.TypeCompletions,
 			DefaultLargeModelID: "copilot-live",
 			DefaultSmallModelID: "copilot-live",
 			Models:              []catwalk.Model{{ID: "copilot-seed", Name: "Copilot Seed"}},
@@ -389,7 +389,7 @@ func TestProviders_Integration_LiveOverlayUpdatesProviderListAndPublishesEvent(t
 		Name:                "Venice",
 		ID:                  catwalk.InferenceProviderVenice,
 		APIEndpoint:         server.URL,
-		Type:                catwalk.TypeOpenAICompat,
+		Type:                catwalk.TypeCompletions,
 		DefaultLargeModelID: "venice-seed",
 		DefaultSmallModelID: "venice-seed",
 		Models:              []catwalk.Model{{ID: "venice-seed", Name: "Venice Seed"}},
@@ -426,11 +426,11 @@ func TestProviders_Integration_LiveOverlayUpdatesProviderListAndPublishesEvent(t
 	require.Equal(t, []catwalk.Model{{
 		ID:               "venice-live",
 		Name:             "Venice Live",
-		CostPer1MIn:      0.1,
-		CostPer1MOut:     0.2,
+		Pricing:          catwalk.Pricing{Input: 0.1, Output: 0.2},
 		ContextWindow:    4096,
 		DefaultMaxTokens: 1024,
-		SupportsImages:   true,
+		Reasoning:        catwalk.Reasoning{Thinking: catwalk.ThinkingNever},
+		Capabilities:     catwalk.Capabilities{Vision: true},
 	}}, venice.Models)
 }
 
@@ -510,7 +510,7 @@ func TestUpdateVenice_LiveSourceStoresCache(t *testing.T) {
 		Name:                "Venice",
 		ID:                  catwalk.InferenceProviderVenice,
 		APIEndpoint:         server.URL,
-		Type:                catwalk.TypeOpenAICompat,
+		Type:                catwalk.TypeCompletions,
 		DefaultLargeModelID: "venice-live",
 		DefaultSmallModelID: "venice-live",
 	}

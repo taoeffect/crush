@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"strings"
 	"time"
 
@@ -78,9 +77,9 @@ crush run --continue "Follow up on your last response"
 			useLast, _         = cmd.Flags().GetBool("continue")
 		)
 
-		// Cancel on SIGINT or SIGTERM.
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
-		defer cancel()
+		// Stop on Ctrl+C, SIGTERM and SIGHUP: Execute cancels the command's
+		// context on each of them (see terminationSignals).
+		ctx := cmd.Context()
 
 		prompt := strings.Join(args, " ")
 
@@ -103,12 +102,18 @@ crush run --continue "Follow up on your last response"
 			event.SetContinueLastSession(true)
 		}
 
-		if useClientServer() {
+		// Only attach to a server that is already running; a one-shot
+		// run should not leave a detached server behind.
+		if useClientServer() && serverRunning(ctx) {
 			c, ws, cleanup, err := connectToServer(cmd)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
+
+			if warn := workspace.ServerVersionWarning(ws.Version); warn != "" {
+				fmt.Fprintf(os.Stderr, "warn: %s\n", warn)
+			}
 
 			event.AppInitialized()
 
@@ -286,6 +291,13 @@ func runNonInteractive(
 		return fmt.Errorf("failed to subscribe to events: %w", err)
 	}
 
+	// Report the session as viewed, so the server does not cancel this
+	// run when another client viewing it leaves. It needs the event
+	// stream above to be attached.
+	if err := c.SetCurrentSession(ctx, ws.ID, sess.ID); err != nil {
+		slog.Warn("Failed to report current session", "session_id", sess.ID, "error", err)
+	}
+
 	// Mint a per-call RunID so we can correlate the terminal
 	// RunComplete with *this* SendMessage even if the session was
 	// busy and another turn finished first. Without it the stream
@@ -304,17 +316,6 @@ func runNonInteractive(
 	// travels per message rather than being set on the agent. So do the
 	// models, for the same reason.
 	runID := uuid.New().String()
-	if err := c.SendMessage(ctx, ws.ID, proto.AgentMessage{
-		SessionID:      sess.ID,
-		RunID:          runID,
-		Prompt:         prompt,
-		AutoApprove:    true,
-		NonInteractive: true,
-		LargeModel:     largeSel,
-		SmallModel:     smallSel,
-	}); err != nil {
-		return fmt.Errorf("failed to send message: %w", err)
-	}
 
 	// The server keeps a run going after the request that started it
 	// returns, so an exit from here that is not a finished run has to
@@ -322,7 +323,8 @@ func runNonInteractive(
 	// Retiring the client on the way out covers the same ground, but not
 	// while the workspace was pre-existing and other clients keep it
 	// alive, and not the ordering between the two. This is the direct
-	// signal.
+	// signal. It is armed before the prompt is sent, so it also covers an
+	// interrupt while the prompt is still in flight.
 	//
 	// The context is fresh and bounded because the usual reason to get
 	// here is Ctrl-C, which has already cancelled ctx.
@@ -337,6 +339,18 @@ func runNonInteractive(
 			slog.Warn("Failed to cancel the agent run while exiting", "run_id", runID, "error", err)
 		}
 	}()
+
+	if err := c.SendMessage(ctx, ws.ID, proto.AgentMessage{
+		SessionID:      sess.ID,
+		RunID:          runID,
+		Prompt:         prompt,
+		AutoApprove:    true,
+		NonInteractive: true,
+		LargeModel:     largeSel,
+		SmallModel:     smallSel,
+	}); err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
+	}
 
 	stream := &runStream{
 		sessionID: sess.ID,
@@ -379,6 +393,8 @@ func runNonInteractive(
 				hc.HandleEvent(hev)
 			}
 
+			cancelOwnQuestion(ctx, c, ws.ID, sess.ID, ev)
+
 			done, err := stream.handle(ev, stopSpinner)
 			if err != nil {
 				return err
@@ -400,6 +416,22 @@ func runNonInteractive(
 // the client that asked for it), so a cancelled terminal event is a
 // failed `crush run`, not a quiet success.
 var errRunCancelled = errors.New("agent run cancelled")
+
+// cancelOwnQuestion cancels ev when it is a question batch the agent raised
+// in this run's session. The workspace's agent is shared with interactive
+// clients, so it can offer this run the question tool too, but nobody is
+// here to answer: a pending question would stall the run forever.
+// Cancelling it ends the agent's turn.
+func cancelOwnQuestion(ctx context.Context, c *client.Client, wsID, sessionID string, ev any) {
+	q, ok := ev.(pubsub.Event[proto.QuestionRequest])
+	if !ok || q.Payload.SessionID != sessionID {
+		return
+	}
+	slog.Warn("Cancelling a question from the agent: a non-interactive run cannot answer it", "session_id", sessionID)
+	if _, err := c.CancelQuestionBatch(ctx, wsID, q.Payload.ID); err != nil {
+		slog.Error("Failed to cancel the agent's question", "error", err)
+	}
+}
 
 // runStream tracks the per-message stdout cursor and the
 // reconciliation state used by [runNonInteractive] to translate
@@ -457,6 +489,7 @@ func (s *runStream) handle(ev any, stopSpinner func()) (done bool, err error) {
 
 		part := content[readBytes:]
 		if readBytes == 0 {
+			part = strings.TrimPrefix(part, "\n")
 			part = strings.TrimLeft(part, " \t")
 		}
 		if s.printed || strings.TrimSpace(part) != "" {
@@ -517,6 +550,7 @@ func (s *runStream) handle(ev any, stopSpinner func()) (done bool, err error) {
 			if readBytes < len(full) {
 				tail := full[readBytes:]
 				if readBytes == 0 {
+					tail = strings.TrimPrefix(tail, "\n")
 					tail = strings.TrimLeft(tail, " \t")
 				}
 				if s.printed || strings.TrimSpace(tail) != "" {

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"testing"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/bedrock"
@@ -51,7 +51,8 @@ func (m *mockSessionAgent) Cancel(sessionID string) {
 	m.cancelled = append(m.cancelled, sessionID)
 }
 func (m *mockSessionAgent) CancelAll()                                  {}
-func (m *mockSessionAgent) IsSessionBusy(sessionID string) bool         { return false }
+func (m *mockSessionAgent) HasActiveTurn(sessionID string) bool         { return false }
+func (m *mockSessionAgent) HasPendingWork(sessionID string) bool        { return false }
 func (m *mockSessionAgent) IsBusy() bool                                { return false }
 func (m *mockSessionAgent) QueuedPrompts(sessionID string) int          { return 0 }
 func (m *mockSessionAgent) QueuedPromptsList(sessionID string) []string { return nil }
@@ -60,13 +61,16 @@ func (m *mockSessionAgent) PopQueuedMessage(sessionID string) (QueuedMessage, bo
 	return m.popped, m.popOK
 }
 
+func (m *mockSessionAgent) AddNote(sessionID, text string) {}
+
+func (m *mockSessionAgent) ListSettledMessages(context.Context, string) ([]message.Message, error) {
+	return nil, nil
+}
+
 func (m *mockSessionAgent) Summarize(context.Context, SummarizeCall) error {
 	return nil
 }
 func (m *mockSessionAgent) GenerateTitle(context.Context, string, string) {}
-func (m *mockSessionAgent) ListSettledMessages(context.Context, string) ([]message.Message, error) {
-	return nil, nil
-}
 
 func TestCoordinatorPopQueuedMessage(t *testing.T) {
 	t.Parallel()
@@ -96,9 +100,10 @@ func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCf
 	require.NoError(t, err)
 	cfg.Config().Providers.Set(providerID, providerCfg)
 	return &coordinator{
-		cfg:      cfg,
-		sessions: env.sessions,
-		messages: env.messages,
+		cfg:         cfg,
+		sessions:    env.sessions,
+		messages:    env.messages,
+		permissions: env.permissions,
 	}
 }
 
@@ -134,23 +139,6 @@ func agentResultWithText(text string) *fantasy.AgentResult {
 			},
 		},
 	}
-}
-
-func TestCopilotResponsesModels(t *testing.T) {
-	t.Parallel()
-
-	for _, modelID := range []string{
-		"gpt-6-astra",
-		"gpt-6-luna",
-		"gpt-6-sol",
-		"gpt-6.1-sol",
-		"grok-4.5",
-		"grok-4.6",
-		"grok-4.7",
-	} {
-		assert.True(t, copilotResponsesModels[modelID], modelID)
-	}
-	assert.False(t, copilotResponsesModels["gpt-4.1"])
 }
 
 func TestRunSubAgent(t *testing.T) {
@@ -293,7 +281,33 @@ func TestRunSubAgent(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.True(t, resp.IsError)
-		assert.Equal(t, "Sub-agent completed but produced no text output.", resp.Content)
+		assert.Equal(t, "Subagent completed but produced no text output.", resp.Content)
+	})
+
+	t.Run("refused or truncated run says why it stopped", func(t *testing.T) {
+		narration := fantasy.ResponseContent{fantasy.TextContent{Text: "Now processes, network, and systemd state."}}
+		for _, tc := range []struct {
+			reason fantasy.FinishReason
+			want   string
+		}{
+			{fantasy.FinishReasonContentFilter, subAgentRefused},
+			{fantasy.FinishReasonLength, subAgentTruncated},
+		} {
+			resp := subAgentResponse(&fantasy.AgentResult{
+				Steps: []fantasy.StepResult{
+					{Response: fantasy.Response{Content: narration, FinishReason: fantasy.FinishReasonToolCalls}},
+					{Response: fantasy.Response{FinishReason: tc.reason}},
+				},
+				Response: fantasy.Response{Content: narration},
+			})
+			assert.True(t, resp.IsError, tc.reason)
+			assert.Equal(t, tc.want, resp.Content, "earlier narration must not pass for a report")
+		}
+
+		resp := subAgentResponse(&fantasy.AgentResult{
+			Steps: []fantasy.StepResult{{Response: fantasy.Response{Content: narration, FinishReason: fantasy.FinishReasonContentFilter}}},
+		})
+		assert.Equal(t, subAgentRefused+"\n\nIts last output before stopping:\n\n"+narration.Text(), resp.Content)
 	})
 
 	t.Run("empty result returns error response", func(t *testing.T) {
@@ -318,7 +332,7 @@ func TestRunSubAgent(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.True(t, resp.IsError)
-		assert.Equal(t, "Sub-agent completed but produced no text output.", resp.Content)
+		assert.Equal(t, "Subagent completed but produced no text output.", resp.Content)
 	})
 
 	t.Run("ModelCfg.MaxTokens overrides default", func(t *testing.T) {
@@ -620,9 +634,11 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			model := Model{
 				CatwalkCfg: catwalk.Model{
-					ID:              "claude-opus-4-7",
-					CanReason:       true,
-					ReasoningLevels: []string{"max"},
+					ID: "claude-opus-4-7",
+					Reasoning: catwalk.Reasoning{
+						Thinking:     catwalk.ThinkingToggleable,
+						EffortLevels: catwalk.NewEffortLevels("max"),
+					},
 				},
 				ModelCfg: config.SelectedModel{
 					Provider:        "test",
@@ -677,9 +693,11 @@ func TestGetProviderOptionsReasoningEffortCustomProvider(t *testing.T) {
 		t.Run(providerType, func(t *testing.T) {
 			model := Model{
 				CatwalkCfg: catwalk.Model{
-					ID:              "qwen/qwen3-8b",
-					CanReason:       true,
-					ReasoningLevels: []string{"low", "medium", "high"},
+					ID: "qwen/qwen3-8b",
+					Reasoning: catwalk.Reasoning{
+						Thinking:     catwalk.ThinkingToggleable,
+						EffortLevels: catwalk.NewEffortLevels("low", "medium", "high"),
+					},
 				},
 				ModelCfg: config.SelectedModel{
 					Provider:        "local",
@@ -704,9 +722,11 @@ func TestGetProviderOptionsReasoningEffortCustomProvider(t *testing.T) {
 func TestGetProviderOptionsReasoningEffortFallback(t *testing.T) {
 	model := Model{
 		CatwalkCfg: catwalk.Model{
-			ID:              "glm-5.2",
-			CanReason:       true,
-			ReasoningLevels: []string{"high", "max"},
+			ID: "glm-5.2",
+			Reasoning: catwalk.Reasoning{
+				Thinking:     catwalk.ThinkingToggleable,
+				EffortLevels: catwalk.NewEffortLevels("high", "max"),
+			},
 		},
 		ModelCfg: config.SelectedModel{
 			Provider: "zai",

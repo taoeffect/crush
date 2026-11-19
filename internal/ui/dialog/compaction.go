@@ -48,10 +48,6 @@ type CompactionItem struct {
 	focused   bool
 }
 
-func (ci *CompactionItem) Finished() bool {
-	return true
-}
-
 var (
 	_ Dialog   = (*Compaction)(nil)
 	_ ListItem = (*CompactionItem)(nil)

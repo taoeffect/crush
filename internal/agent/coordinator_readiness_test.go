@@ -22,7 +22,7 @@ import (
 // buildAgent starts readiness goroutines that build the system prompt and the
 // initial tool list. Several server entry points build an agent from a
 // short-lived HTTP request context — the InitAgent/UpdateAgent handlers, and
-// the sub-agent build reached through UpdateModels -> buildTools -> agentTool.
+// the subagent build reached through UpdateModels -> buildTools -> agentTool.
 // When that request context was canceled the moment the handler returned, the
 // readiness group recorded context.Canceled and every later coordinator.run
 // failed at the readiness wait before emitting anything — the session hung
@@ -73,7 +73,7 @@ func TestBuildAgentReadinessSurvivesCallerCancellation(t *testing.T) {
 	mcp.ArmInit()
 	t.Cleanup(mcp.DisarmInit)
 
-	p, err := coderPrompt(prompt.WithWorkingDir(env.workingDir))
+	p, err := loadPrompt(cfg, "coder", prompt.WithWorkingDir(env.workingDir))
 	require.NoError(t, err)
 	agentCfg := cfg.Config().Agents[config.AgentCoder]
 
@@ -140,6 +140,7 @@ func TestConcurrentRunsDoNotShareOneReadinessGroup(t *testing.T) {
 				_, errs[i] = coord.run(
 					context.Background(),
 					nil,
+					nil,
 					fmt.Sprintf("session-%d-%d", round, i),
 					"hello",
 				)
@@ -173,7 +174,7 @@ func TestConcurrentRunsDoNotShareOneReadinessGroup(t *testing.T) {
 func TestFailedAgentBuildDoesNotPoisonLaterRuns(t *testing.T) {
 	coord := newGateTestCoordinator(t)
 
-	p, err := coderPrompt(prompt.WithWorkingDir(coord.cfg.WorkingDir()))
+	p, err := loadPrompt(coord.cfg, "coder", prompt.WithWorkingDir(coord.cfg.WorkingDir()))
 	require.NoError(t, err)
 	agentCfg := coord.cfg.Config().Agents[config.AgentCoder]
 
@@ -189,7 +190,7 @@ func TestFailedAgentBuildDoesNotPoisonLaterRuns(t *testing.T) {
 		return buildErr
 	}))
 
-	_, err = coord.run(ctx, nil, "session-on-broken-agent", "hello")
+	_, err = coord.run(ctx, nil, nil, "session-on-broken-agent", "hello")
 	require.ErrorIs(t, err, buildErr,
 		"a run must report the readiness failure of the agent it was about to use")
 
@@ -202,7 +203,36 @@ func TestFailedAgentBuildDoesNotPoisonLaterRuns(t *testing.T) {
 
 	// This run fails for unrelated reasons (unknown session, closed provider
 	// port); it must not fail on the previous agent's build error.
-	_, err = coord.run(ctx, nil, "session-after-failed-build", "hello")
+	_, err = coord.run(ctx, nil, nil, "session-after-failed-build", "hello")
 	require.NotErrorIs(t, err, buildErr,
 		"a rebuilt agent inherited the previous build's readiness error")
+}
+
+// TestTaskAgentsDoNotJoinCoordinatorReadiness is a regression test for a
+// "sync: WaitGroup is reused before previous Wait has returned" panic.
+//
+// Every turn rebuilds the task subagents (run -> updateTools -> buildTools
+// -> agentTool -> taskAgents). Those builds used to join a readiness group
+// shared with the main agent while another run, such as a subagent report
+// being delivered, was blocked waiting on it. Adding work to a WaitGroup
+// with a Wait in flight panics. Each build now has a handle of its own: the
+// subagents are fully set up by the time taskAgents returns, and the main
+// agent keeps the handle it was registered with.
+func TestTaskAgentsDoNotJoinCoordinatorReadiness(t *testing.T) {
+	coord := newGateTestCoordinator(t)
+	_, _, ready := coord.activeAgent()
+
+	for range 20 {
+		agents, err := coord.taskAgents(context.Background(), false)
+		require.NoError(t, err)
+		for access, agent := range agents {
+			sa, ok := agent.(*sessionAgent)
+			require.True(t, ok)
+			require.NotEmpty(t, sa.systemPrompt.Get(), "%s subagent returned before its system prompt was set", access)
+			require.NotZero(t, sa.tools.Len(), "%s subagent returned before its tools were set", access)
+		}
+	}
+
+	_, _, after := coord.activeAgent()
+	require.Same(t, ready, after, "a task subagent build replaced the main agent's readiness")
 }

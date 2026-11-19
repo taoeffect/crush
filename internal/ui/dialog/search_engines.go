@@ -49,10 +49,6 @@ type SearchEngineItem struct {
 	focused   bool
 }
 
-func (s *SearchEngineItem) Finished() bool {
-	return true
-}
-
 var (
 	_ Dialog   = (*SearchEngines)(nil)
 	_ ListItem = (*SearchEngineItem)(nil)

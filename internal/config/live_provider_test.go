@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"github.com/stretchr/testify/require"
 )
 
@@ -405,7 +405,7 @@ func testLiveSeedProvider() catwalk.Provider {
 		ID:                  "test-live",
 		Name:                "Test Live",
 		APIEndpoint:         "https://example.com/v1",
-		Type:                catwalk.TypeOpenAICompat,
+		Type:                catwalk.TypeCompletions,
 		DefaultLargeModelID: "seed-large-model",
 		DefaultSmallModelID: "seed-small-model",
 		DefaultHeaders: map[string]string{

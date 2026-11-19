@@ -27,6 +27,12 @@ func interruptedTurn() *message.Message {
 	}
 }
 
+// spinning reports whether item still shows a running animation.
+func spinning(item MessageItem) bool {
+	anim, ok := item.(Animatable)
+	return ok && anim.Spinning()
+}
+
 // TestFrozenTranscriptSpinsForever documents the state the load-time
 // repair exists to remove: with no finish part and no tool result the
 // chat reports work in progress on a session that has none.
@@ -35,7 +41,7 @@ func TestFrozenTranscriptSpinsForever(t *testing.T) {
 	msg := interruptedTurn()
 	items := ExtractMessageItems(&sty, msg, nil, "/tmp")
 	require.Len(t, items, 1, "a tool-only turn renders just the tool row")
-	require.False(t, items[0].Finished(), "the tool row never reaches a terminal state")
+	require.True(t, spinning(items[0]), "the tool row never reaches a terminal state")
 	require.Contains(t, items[0].Render(80), "Waiting for tool response")
 }
 
@@ -63,7 +69,7 @@ func TestRepairedTranscriptRendersInterrupted(t *testing.T) {
 
 	var out strings.Builder
 	for _, item := range items {
-		require.True(t, item.Finished(), "no item may still report work in progress")
+		require.False(t, spinning(item), "no item may still report work in progress")
 		out.WriteString(item.Render(80))
 		out.WriteString("\n")
 	}

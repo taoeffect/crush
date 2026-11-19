@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -111,7 +111,6 @@ func lifetimeTestAgent(env fakeEnv, large fantasy.LanguageModel, broker *pubsub.
 			Model{Model: large, CatwalkCfg: window},
 			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: window},
 		),
-		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		RunComplete: broker,

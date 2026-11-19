@@ -72,7 +72,7 @@ func oneToolCallScript(callID, toolName string) []scriptedStep {
 func TestRun_SubAgentTurnInheritsTheRunsApproval(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
+	perms := permission.NewPermissionService(env.workingDir, nil, nil)
 
 	parentSess, err := env.sessions.Create(t.Context(), "parent")
 	require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestRun_SubAgentTurnInheritsTheRunsApproval(t *testing.T) {
 func TestRun_SubAgentTurnOfAnOrdinaryRunStillPrompts(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
+	perms := permission.NewPermissionService(env.workingDir, nil, nil)
 
 	parentSess, err := env.sessions.Create(t.Context(), "parent")
 	require.NoError(t, err)
@@ -148,7 +148,7 @@ func TestRun_SubAgentTurnOfAnOrdinaryRunStillPrompts(t *testing.T) {
 func TestRun_ToolCallsSeeTheirOwnTurnsApproval(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
+	perms := permission.NewPermissionService(env.workingDir, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -179,7 +179,7 @@ func TestRun_ToolCallsSeeTheirOwnTurnsApproval(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("main run never entered Stream")
 	}
-	require.True(t, sa.IsSessionBusy(sess.ID))
+	require.True(t, sa.HasActiveTurn(sess.ID))
 
 	// A RunID keeps the follow-up out of the fold path, so it runs as
 	// its own turn — inside the main turn's frame.

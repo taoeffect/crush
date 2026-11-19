@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 
 	"github.com/charmbracelet/crush/internal/permission"
@@ -151,7 +151,7 @@ func (m *gatedToolStreamModel) StreamObject(context.Context, fantasy.ObjectCall)
 func TestRun_AutoApproveHoldLastsExactlyTheTurn(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
+	perms := permission.NewPermissionService(env.workingDir, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -191,7 +191,7 @@ func TestRun_AutoApproveHoldLastsExactlyTheTurn(t *testing.T) {
 func TestRun_WithoutAutoApproveStillPrompts(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
+	perms := permission.NewPermissionService(env.workingDir, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -222,7 +222,7 @@ func TestRun_WithoutAutoApproveStillPrompts(t *testing.T) {
 func TestRun_QueuedPromptTakesItsOwnHold(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
+	perms := permission.NewPermissionService(env.workingDir, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -256,7 +256,7 @@ func TestRun_QueuedPromptTakesItsOwnHold(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("main run never entered Stream")
 	}
-	require.True(t, sa.IsSessionBusy(sess.ID))
+	require.True(t, sa.HasActiveTurn(sess.ID))
 
 	// Queue the auto-approving prompt behind the busy turn. A RunID keeps
 	// it out of the fold path, so it runs as its own turn.
@@ -288,7 +288,7 @@ func TestRun_QueuedPromptTakesItsOwnHold(t *testing.T) {
 func TestRun_QueuedPromptDoesNotInheritTheHold(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
+	perms := permission.NewPermissionService(env.workingDir, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -320,7 +320,7 @@ func TestRun_QueuedPromptDoesNotInheritTheHold(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("main run never entered Stream")
 	}
-	require.True(t, sa.IsSessionBusy(sess.ID))
+	require.True(t, sa.HasActiveTurn(sess.ID))
 
 	// Queue an ordinary prompt behind the auto-approved turn. A RunID
 	// keeps it out of the fold path, so it runs as its own turn.
@@ -351,7 +351,7 @@ func TestRun_QueuedPromptDoesNotInheritTheHold(t *testing.T) {
 func TestRun_CancelledTurnReleasesTheHold(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	perms := permission.NewPermissionService(env.workingDir, false, nil, nil)
+	perms := permission.NewPermissionService(env.workingDir, nil, nil)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)

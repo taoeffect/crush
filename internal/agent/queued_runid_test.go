@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/message"
@@ -98,11 +98,11 @@ func TestRun_QueuedRunIDPromptRunsRecursivelyAndPublishesRunComplete(t *testing.
 	small := &finishStreamModel{text: "title"}
 
 	sa := NewSessionAgent(SessionAgentOptions{
+		Cfg: testConfigStore(),
 		Models: fixedModels(
 			Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 			Model{Model: small, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 		),
-		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		RunComplete: broker,
@@ -132,7 +132,7 @@ func TestRun_QueuedRunIDPromptRunsRecursivelyAndPublishesRunComplete(t *testing.
 	case <-time.After(5 * time.Second):
 		t.Fatal("main run never entered Stream")
 	}
-	require.True(t, sa.IsSessionBusy(sess.ID), "main run must be active before enqueueing the follow-up")
+	require.True(t, sa.HasActiveTurn(sess.ID), "main run must be active before enqueueing the follow-up")
 
 	// Enqueue a RunID-bearing follow-up behind the busy session.
 	res, err := sa.Run(t.Context(), SessionAgentCall{
@@ -220,7 +220,6 @@ func TestRun_CancelKeepsQueuedPromptsForEditing(t *testing.T) {
 			Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 			Model{Model: small, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 		),
-		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		RunComplete: broker,
@@ -247,7 +246,7 @@ func TestRun_CancelKeepsQueuedPromptsForEditing(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("main run never entered Stream")
 	}
-	require.True(t, sa.IsSessionBusy(sess.ID))
+	require.True(t, sa.HasActiveTurn(sess.ID))
 
 	// The user queues two prompts behind the busy turn: one typed in the
 	// TUI (no RunID) and one submitted by a non-interactive caller.
@@ -311,7 +310,7 @@ func TestRun_CancelKeepsQueuedPromptsForEditing(t *testing.T) {
 // agent after "esc esc": cancellation is turn-scoped, so the session is
 // left idle with its queue intact, and the prompt the user sends to get
 // going again must run *behind* what is already queued. Keying the
-// dispatch decision on IsSessionBusy alone would make the new prompt the
+// dispatch decision on HasActiveTurn alone would make the new prompt the
 // active run, overtaking every queued prompt and leaving them to drain
 // after it.
 //
@@ -333,7 +332,6 @@ func TestRun_IdleWithQueueRunsSubmissionsOldestFirst(t *testing.T) {
 			Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 			Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 		),
-		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		RunComplete: broker,
@@ -349,7 +347,7 @@ func TestRun_IdleWithQueueRunsSubmissionsOldestFirst(t *testing.T) {
 	// Two prompts survived a cancel and sit queued on an idle session.
 	sa.enqueueCall(SessionAgentCall{SessionID: sess.ID, RunID: "run-one", Prompt: "queued-one"})
 	sa.enqueueCall(SessionAgentCall{SessionID: sess.ID, RunID: "run-two", Prompt: "queued-two"})
-	require.False(t, sa.IsSessionBusy(sess.ID))
+	require.False(t, sa.HasActiveTurn(sess.ID))
 
 	_, err = sa.Run(t.Context(), SessionAgentCall{
 		SessionID: sess.ID,
@@ -419,7 +417,7 @@ func TestRun_HandoffInFlightQueuesSubmissionBehindThePromotion(t *testing.T) {
 	// promoted call on its way into Run, and no active request.
 	sa.enqueueCall(SessionAgentCall{SessionID: sess.ID, RunID: "run-queued", Prompt: "queued"})
 	sa.beginHandoff(sess.ID)
-	require.False(t, sa.IsSessionBusy(sess.ID))
+	require.False(t, sa.HasActiveTurn(sess.ID))
 
 	res, err := sa.Run(t.Context(), SessionAgentCall{
 		SessionID: sess.ID,
@@ -430,7 +428,7 @@ func TestRun_HandoffInFlightQueuesSubmissionBehindThePromotion(t *testing.T) {
 	require.Nil(t, res, "a submission landing in the handoff window must enqueue and return (nil, nil)")
 	require.Equal(t, []string{"queued", "new"}, sa.QueuedPromptsList(sess.ID),
 		"the submission must land behind the queue instead of swapping itself ahead of the promoted call")
-	require.False(t, sa.IsSessionBusy(sess.ID), "no run may start inside the handoff window")
+	require.False(t, sa.HasActiveTurn(sess.ID), "no run may start inside the handoff window")
 	msgs, err := env.messages.List(t.Context(), sess.ID)
 	require.NoError(t, err)
 	require.Empty(t, msgs, "the queued submission must not have started a turn")
@@ -488,7 +486,6 @@ func TestRun_SubmissionDuringCompletionHandoffRunsAfterTheQueue(t *testing.T) {
 			Model{Model: large, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 		),
-		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		RunComplete: broker,
@@ -515,7 +512,7 @@ func TestRun_SubmissionDuringCompletionHandoffRunsAfterTheQueue(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the first run never entered Stream")
 	}
-	require.True(t, sa.IsSessionBusy(sess.ID))
+	require.True(t, sa.HasActiveTurn(sess.ID))
 
 	// Two RunID-bearing prompts queue up behind it, so neither can be
 	// folded into another turn.
@@ -543,7 +540,7 @@ func TestRun_SubmissionDuringCompletionHandoffRunsAfterTheQueue(t *testing.T) {
 	// on the dispatch mutex, which is exactly the window under test.
 	close(large.gate)
 	require.Eventually(t, func() bool {
-		return !sa.IsSessionBusy(sess.ID)
+		return !sa.HasActiveTurn(sess.ID)
 	}, 10*time.Second, 10*time.Millisecond,
 		"the first turn never reached its completion handoff")
 
@@ -647,7 +644,6 @@ func TestRun_SwappedHeadFailureIsNotAttributedToTheRequeuedSubmission(t *testing
 			Model{Model: &errStreamModel{err: streamErr, text: "done"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}},
 		),
-		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		RunComplete: broker,
@@ -662,7 +658,7 @@ func TestRun_SwappedHeadFailureIsNotAttributedToTheRequeuedSubmission(t *testing
 
 	// A prompt survived a cancel and sits queued on an idle session.
 	sa.enqueueCall(SessionAgentCall{SessionID: sess.ID, RunID: "run-a", Prompt: "queued"})
-	require.False(t, sa.IsSessionBusy(sess.ID))
+	require.False(t, sa.HasActiveTurn(sess.ID))
 
 	// Dispatched the way backend.runAgent does it: the RunID and run-complete
 	// marker live on the ctx.

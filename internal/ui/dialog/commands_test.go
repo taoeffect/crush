@@ -19,7 +19,11 @@ type configWorkspace struct {
 	workspace.Workspace
 }
 
-func (configWorkspace) Config() *config.Config { return &config.Config{} }
+// Config returns what loading fills in for every config: Options and its TUI
+// options are never nil.
+func (configWorkspace) Config() *config.Config {
+	return &config.Config{Options: &config.Options{TUI: &config.TUIOptions{}}}
+}
 
 func hasCommandAction(items []*CommandItem, action Action) bool {
 	for _, item := range items {

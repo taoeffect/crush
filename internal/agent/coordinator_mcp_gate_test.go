@@ -46,7 +46,7 @@ func newGateTestCoordinator(t *testing.T) *coordinator {
 		agents:      make(map[string]SessionAgent),
 	}
 
-	p, err := coderPrompt(prompt.WithWorkingDir(env.workingDir))
+	p, err := loadPrompt(cfg, "coder", prompt.WithWorkingDir(env.workingDir))
 	require.NoError(t, err)
 	agentCfg := cfg.Config().Agents[config.AgentCoder]
 
@@ -84,7 +84,7 @@ func TestRunWaitsForMCPOnlyWhenNonInteractive(t *testing.T) {
 		ctx, cancel := context.WithTimeout(WithNonInteractive(context.Background()), 200*time.Millisecond)
 		defer cancel()
 
-		_, err := coord.run(ctx, nil, "test-session", "hello")
+		_, err := coord.run(ctx, nil, nil, "test-session", "hello")
 		require.ErrorContains(t, err, "MCP initialization",
 			"non-interactive run must block on MCP initialization")
 	})
@@ -97,7 +97,7 @@ func TestRunWaitsForMCPOnlyWhenNonInteractive(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			_, err := coord.run(context.Background(), nil, "test-session", "hello")
+			_, err := coord.run(context.Background(), nil, nil, "test-session", "hello")
 			done <- err
 		}()
 
@@ -114,4 +114,28 @@ func TestRunWaitsForMCPOnlyWhenNonInteractive(t *testing.T) {
 			t.Fatal("interactive run blocked; it must not wait for MCP initialization")
 		}
 	})
+}
+
+func TestRefreshSkillPromptRebuildsOnlyAfterToggle(t *testing.T) {
+	t.Parallel()
+
+	coord := newGateTestCoordinator(t)
+	_, _, ready := coord.activeAgent()
+	require.NoError(t, ready.wait(t.Context()))
+
+	p, err := loadPrompt(coord.cfg, "coder", coord.skillOverrideOptions()...)
+	require.NoError(t, err)
+	coord.prompts = map[string]*prompt.Prompt{config.AgentCoder: p}
+	coord.skillKeys = map[string]string{config.AgentCoder: coord.skillToggleKey(t.Context())}
+
+	agent := coord.mainAgent.(*sessionAgent)
+	agent.SetSystemPrompt("stale")
+
+	require.NoError(t, coord.refreshSkillPrompt(t.Context(), agent, config.AgentCoder))
+	require.Equal(t, "stale", agent.systemPrompt.Get(), "unchanged toggles must keep the prompt")
+
+	require.NoError(t, coord.sessions.SetSkillDisabled(t.Context(), "crush-config", true, false))
+	require.NoError(t, coord.refreshSkillPrompt(t.Context(), agent, config.AgentCoder))
+	require.NotEqual(t, "stale", agent.systemPrompt.Get(), "a toggle must rebuild the prompt")
+	require.NotContains(t, agent.systemPrompt.Get(), "<name>crush-config</name>")
 }

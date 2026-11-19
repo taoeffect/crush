@@ -18,9 +18,9 @@ const (
 	compactTriggerManual = "manual"
 )
 
-// fireTurnHook runs one hook for a top-level turn. Sub-agent turns (the
+// fireTurnHook runs one hook for a top-level turn. Subagent turns (the
 // task tool, agentic_fetch, etc.) are skipped so a delegated turn does
-// not fire the user's hook N times, matching the sub-agent exclusion
+// not fire the user's hook N times, matching the subagent exclusion
 // applied to tool hooks.
 //
 // SubAgent, not NonInteractive, decides: a `crush run` turn is

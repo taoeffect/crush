@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 )
 
 var _ liveProviderClient = realVeniceModelsClient{}
@@ -49,7 +49,7 @@ func (r realVeniceModelsClient) Get(ctx context.Context) (catwalk.Provider, erro
 	result = catwalk.Provider{
 		ID:          catwalk.InferenceProviderVenice,
 		APIEndpoint: baseURL,
-		Type:        catwalk.TypeOpenAICompat,
+		Type:        catwalk.TypeCompletions,
 		Models:      veniceModelsToCatwalkModels(models),
 	}
 	return result, nil
@@ -135,18 +135,28 @@ func veniceModelsToCatwalkModels(response veniceModelsResponse) []catwalk.Model 
 			contextWindow = model.ContextLength
 		}
 
+		capabilities := model.ModelSpec.Capabilities
+		reasoning := catwalk.Reasoning{Thinking: catwalk.ThinkingNever}
+		if capabilities.SupportsReasoning {
+			reasoning.Thinking = catwalk.ThinkingToggleable
+			if len(capabilities.ReasoningEffortOptions) > 0 {
+				reasoning.EffortLevels = catwalk.NewEffortLevels(capabilities.ReasoningEffortOptions...)
+				reasoning.DefaultEffortLevel = capabilities.DefaultReasoningEffort
+			}
+		}
+
 		models = append(models, catwalk.Model{
-			ID:                     model.ID,
-			Name:                   model.ModelSpec.Name,
-			CostPer1MIn:            float64(model.ModelSpec.Pricing.Input.USD),
-			CostPer1MOut:           float64(model.ModelSpec.Pricing.Output.USD),
-			CostPer1MInCached:      float64(model.ModelSpec.Pricing.CacheInput.USD),
-			ContextWindow:          contextWindow,
-			DefaultMaxTokens:       model.ModelSpec.MaxCompletionTokens,
-			CanReason:              model.ModelSpec.Capabilities.SupportsReasoning,
-			ReasoningLevels:        model.ModelSpec.Capabilities.ReasoningEffortOptions,
-			DefaultReasoningEffort: model.ModelSpec.Capabilities.DefaultReasoningEffort,
-			SupportsImages:         model.ModelSpec.Capabilities.SupportsVision,
+			ID:   model.ID,
+			Name: model.ModelSpec.Name,
+			Pricing: catwalk.Pricing{
+				Input:       float64(model.ModelSpec.Pricing.Input.USD),
+				Output:      float64(model.ModelSpec.Pricing.Output.USD),
+				CacheCreate: float64(model.ModelSpec.Pricing.CacheInput.USD),
+			},
+			ContextWindow:    contextWindow,
+			DefaultMaxTokens: model.ModelSpec.MaxCompletionTokens,
+			Reasoning:        reasoning,
+			Capabilities:     catwalk.Capabilities{Vision: capabilities.SupportsVision},
 		})
 	}
 	return models

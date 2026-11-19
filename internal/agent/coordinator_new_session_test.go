@@ -91,7 +91,7 @@ func TestBuildToolsNewSessionRegistration(t *testing.T) {
 				AllowedMCP:   map[string][]string{},
 			}
 
-			builtTools, err := coord.buildTools(t.Context(), agentCfg, tc.isSubAgent)
+			builtTools, err := coord.buildTools(t.Context(), agentCfg, tc.isSubAgent, nil)
 			require.NoError(t, err)
 
 			var newSessionTool fantasy.AgentTool

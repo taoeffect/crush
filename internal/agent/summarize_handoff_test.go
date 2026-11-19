@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/message"
@@ -32,7 +32,6 @@ func handoffAgent(t *testing.T, env fakeEnv, large fantasy.LanguageModel, tools 
 			Model{Model: large, CatwalkCfg: window},
 			Model{Model: &finishStreamModel{text: "title"}, CatwalkCfg: window},
 		),
-		IsYolo:      true,
 		Sessions:    env.sessions,
 		Messages:    env.messages,
 		Tools:       tools,
@@ -229,7 +228,7 @@ func TestSummarize_FailedSummarizeStillRunsQueuedPrompts(t *testing.T) {
 	require.Empty(t, got[0].Error)
 	require.False(t, got[0].Cancelled)
 	require.Equal(t, "done", got[0].Text)
-	require.False(t, sa.IsSessionBusy(sess.ID))
+	require.False(t, sa.HasActiveTurn(sess.ID))
 	require.Equal(t, 0, sa.QueuedPrompts(sess.ID))
 }
 
@@ -364,7 +363,7 @@ func TestRun_AutoCompactionDoesNotResumeAfterAQueuedPrompt(t *testing.T) {
 		"the queued prompt supersedes the interrupted work; the original must not be resumed")
 	require.Equal(t, int64(3), model.calls.Load(),
 		"one turn step, the summary, and the queued prompt's turn")
-	require.False(t, sa.IsSessionBusy(sess.ID))
+	require.False(t, sa.HasActiveTurn(sess.ID))
 	require.Equal(t, 0, sa.QueuedPrompts(sess.ID))
 }
 

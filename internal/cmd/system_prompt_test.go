@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +44,7 @@ func TestApplyWorkspaceOverrides_SystemPromptOverride(t *testing.T) {
 		Options: &config.Options{},
 	})
 
-	applyWorkspaceOverrides(store, false, systemPromptPath, nil)
+	applyWorkspaceOverrides(store, permission.PermissionModeNormal, systemPromptPath, nil, nil)
 
 	require.Equal(t, systemPromptPath, store.Overrides().SystemPromptPath)
 	require.Empty(t, store.Config().Options.SystemPromptPath)

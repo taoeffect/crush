@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/stretchr/testify/require"
 )
@@ -30,10 +32,15 @@ func hermeticApp(t *testing.T) *App {
 	store, err := config.Init(t.Context(), dir, "", false)
 	require.NoError(t, err)
 	store.SetupAgents()
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
 
 	app := NewForTest(t.Context())
 	t.Cleanup(app.ShutdownForTest)
 	app.config = store
+	// The coordinator build reads the repository's skill toggles.
+	app.Sessions = session.NewService(db.New(conn), conn)
 	// An empty manager, so the build does not scan the machine's skill
 	// directories.
 	app.Skills = skills.NewManager(nil, nil, nil)

@@ -16,6 +16,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -89,7 +90,6 @@ func TestRun_UsesTheTurnsOwnPromptAndPrefix(t *testing.T) {
 			modelWithPrefix(workspace, "workspace-provider", "workspace-model", "WORKSPACE-PREFIX"),
 		),
 		SystemPrompt: "workspace system prompt",
-		IsYolo:       true,
 		Sessions:     env.sessions,
 		Messages:     env.messages,
 	}).(*sessionAgent)
@@ -134,7 +134,6 @@ func TestGenerateTitle_UsesTheAttemptedModelsPrefix(t *testing.T) {
 			modelWithPrefix(&finishStreamModel{text: "a title"}, "small-provider", "small-model", "SMALL-PREFIX"),
 		),
 		SystemPrompt: "system prompt",
-		IsYolo:       true,
 		Sessions:     env.sessions,
 		Messages:     env.messages,
 	}).(*sessionAgent)
@@ -282,16 +281,18 @@ func TestAgentTool_DelegatedTurnUsesTheInheritedModelsPrompt(t *testing.T) {
 	cfg.SetupAgents()
 
 	coord := &coordinator{
-		cfg:         cfg,
-		sessions:    env.sessions,
-		messages:    env.messages,
-		permissions: env.permissions,
-		history:     env.history,
-		filetracker: *env.filetracker,
-		agents:      make(map[string]SessionAgent),
+		cfg:             cfg,
+		sessions:        env.sessions,
+		messages:        env.messages,
+		permissions:     env.permissions,
+		history:         env.history,
+		filetracker:     *env.filetracker,
+		agents:          make(map[string]SessionAgent),
+		dispatched:      csync.NewMap[string, *dispatchedAgent](),
+		backgroundAfter: subAgentBackgroundAfter,
 	}
 
-	tool, err := coord.agentTool(t.Context())
+	tool, err := coord.agentTool(t.Context(), config.AgentCoder)
 	require.NoError(t, err)
 
 	parent, err := env.sessions.Create(t.Context(), "parent")

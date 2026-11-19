@@ -57,7 +57,7 @@ func TestQueuePillAlwaysHasBorder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			u := newTestUI()
 			u.session = &session.Session{ID: "s1", Todos: tc.todos}
-			u.promptQueue = tc.queue
+			u.promptQueue.SetFetched(make([]string, tc.queue))
 			u.pillsExpanded = tc.expanded
 			u.focusedPillSection = tc.focusedSection
 			u.updateLayoutAndSize()
@@ -93,7 +93,7 @@ func TestEffectiveFocusedSectionFallsThrough(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			u := newTestUI()
 			u.session = &session.Session{ID: "s1", Todos: tc.todos}
-			u.promptQueue = tc.queue
+			u.promptQueue.SetFetched(make([]string, tc.queue))
 			u.focusedPillSection = tc.stored
 			if got := u.effectiveFocusedSection(); got != tc.expected {
 				t.Fatalf("effectiveFocusedSection() = %d, want %d", got, tc.expected)
@@ -127,7 +127,7 @@ func TestPillsRowPopHint(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			u := newTestUI()
 			u.session = &session.Session{ID: "s1", Todos: tc.todos}
-			u.promptQueue = tc.queue
+			u.promptQueue.SetFetched(make([]string, tc.queue))
 			u.pillsExpanded = tc.expanded
 			u.focusedPillSection = tc.focusedSection
 			u.updateLayoutAndSize()
@@ -175,7 +175,7 @@ func TestPillsRowEscapeQueueHint(t *testing.T) {
 				ID:    "s1",
 				Todos: []session.Todo{{Content: "a", Status: session.TodoStatusPending}},
 			}
-			u.promptQueue = tc.queue
+			u.promptQueue.SetFetched(make([]string, tc.queue))
 			u.agentBusyCache.set(tc.busy)
 			u.updateLayoutAndSize()
 			u.renderPills()
@@ -205,7 +205,7 @@ func TestPillsRowWrapsBusyEscapeHintBesidePills(t *testing.T) {
 	u := newTestUI()
 	u.width = 80
 	u.session = &session.Session{ID: "s1"}
-	u.promptQueue = 1
+	u.promptQueue.SetFetched(make([]string, 1))
 	u.agentBusyCache.set(true)
 	u.updateLayoutAndSize()
 	u.renderPills()
@@ -244,7 +244,7 @@ func TestPillsRowWideHintFallsBackBelowPills(t *testing.T) {
 			Status:  session.TodoStatusInProgress,
 		}},
 	}
-	u.promptQueue = 3
+	u.promptQueue.SetFetched(make([]string, 3))
 	u.agentBusyCache.set(true)
 	u.updateLayoutAndSize()
 	u.renderPills()
@@ -282,8 +282,7 @@ func TestPillsRowWrappedHeightMatchesRenderedView(t *testing.T) {
 								Status:  session.TodoStatusInProgress,
 							}}
 						}
-						u.promptQueueItems = []string{"first", "second", "third"}
-						u.promptQueue = len(u.promptQueueItems)
+						u.promptQueue.SetFetched([]string{"first", "second", "third"})
 						u.agentBusyCache.set(busy)
 						u.pillsExpanded = expanded
 						u.focusedPillSection = pillSectionQueue
@@ -311,7 +310,7 @@ func TestPillsRowWrappedHeightMatchesRenderedView(t *testing.T) {
 func TestPillsRowWideIdleQueueDoesNotWrap(t *testing.T) {
 	u := newTestUI()
 	u.session = &session.Session{ID: "s1"}
-	u.promptQueue = 3
+	u.promptQueue.SetFetched(make([]string, 3))
 	u.updateLayoutAndSize()
 	u.renderPills()
 
@@ -333,12 +332,11 @@ func lineContaining(lines []string, text string) int {
 func TestExpandedQueueListEscapesControlsWithoutHidingItems(t *testing.T) {
 	u := newTestUI()
 	u.session = &session.Session{ID: "s1"}
-	u.promptQueueItems = []string{
+	u.promptQueue.SetFetched([]string{
 		"first line\r\nsecond line",
 		"tab\tvalue",
 		"message after controls",
-	}
-	u.promptQueue = len(u.promptQueueItems)
+	})
 	u.pillsExpanded = true
 	u.focusedPillSection = pillSectionQueue
 	u.updateLayoutAndSize()
@@ -352,9 +350,9 @@ func TestExpandedQueueListEscapesControlsWithoutHidingItems(t *testing.T) {
 		}
 	}
 
-	if len(queueLines) != len(u.promptQueueItems) {
+	if len(queueLines) != u.promptQueue.Shown() {
 		t.Fatalf("rendered %d queue rows, want %d:\n%s",
-			len(queueLines), len(u.promptQueueItems), view)
+			len(queueLines), u.promptQueue.Shown(), view)
 	}
 	if !strings.Contains(queueLines[0], `first line\nsecond line`) {
 		t.Fatalf("expected escaped newline in first queue row: %q", queueLines[0])

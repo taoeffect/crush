@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"github.com/stretchr/testify/require"
 )
 
@@ -72,26 +72,27 @@ func TestRealVeniceModelsClientGetMapsModelsAndSendsHeaders(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, catwalk.InferenceProviderVenice, provider.ID)
 	require.Equal(t, server.URL, provider.APIEndpoint)
-	require.Equal(t, catwalk.TypeOpenAICompat, provider.Type)
+	require.Equal(t, catwalk.TypeCompletions, provider.Type)
 	require.Equal(t, []catwalk.Model{
 		{
-			ID:                     "venice-reasoning",
-			Name:                   "Venice Reasoning",
-			CostPer1MIn:            0.15,
-			CostPer1MOut:           0.6,
-			CostPer1MInCached:      0.03,
-			ContextWindow:          128000,
-			DefaultMaxTokens:       4096,
-			CanReason:              true,
-			ReasoningLevels:        []string{"low", "medium", "high"},
-			DefaultReasoningEffort: "medium",
-			SupportsImages:         true,
+			ID:               "venice-reasoning",
+			Name:             "Venice Reasoning",
+			Pricing:          catwalk.Pricing{Input: 0.15, Output: 0.6, CacheCreate: 0.03},
+			ContextWindow:    128000,
+			DefaultMaxTokens: 4096,
+			Reasoning: catwalk.Reasoning{
+				Thinking:           catwalk.ThinkingToggleable,
+				EffortLevels:       catwalk.NewEffortLevels("low", "medium", "high"),
+				DefaultEffortLevel: "medium",
+			},
+			Capabilities: catwalk.Capabilities{Vision: true},
 		},
 		{
 			ID:               "venice-fallback",
 			Name:             "Venice Fallback",
 			ContextWindow:    64000,
 			DefaultMaxTokens: 2048,
+			Reasoning:        catwalk.Reasoning{Thinking: catwalk.ThinkingNever},
 		},
 	}, provider.Models)
 }
@@ -133,16 +134,16 @@ func TestVeniceModelsToCatwalkModelsFiltersNonTextAndOfflineModels(t *testing.T)
 
 	require.Equal(t, []catwalk.Model{
 		{
-			ID:                     "text-model",
-			Name:                   "Text Model",
-			CostPer1MIn:            0.1,
-			CostPer1MOut:           0.2,
-			CostPer1MInCached:      0.01,
-			ContextWindow:          32000,
-			DefaultMaxTokens:       2048,
-			CanReason:              true,
-			ReasoningLevels:        []string{"low"},
-			DefaultReasoningEffort: "low",
+			ID:               "text-model",
+			Name:             "Text Model",
+			Pricing:          catwalk.Pricing{Input: 0.1, Output: 0.2, CacheCreate: 0.01},
+			ContextWindow:    32000,
+			DefaultMaxTokens: 2048,
+			Reasoning: catwalk.Reasoning{
+				Thinking:           catwalk.ThinkingToggleable,
+				EffortLevels:       catwalk.NewEffortLevels("low"),
+				DefaultEffortLevel: "low",
+			},
 		},
 	}, models)
 }

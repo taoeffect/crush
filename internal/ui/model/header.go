@@ -3,8 +3,10 @@ package model
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
+	"charm.land/x/nerdfont"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/session"
@@ -75,6 +77,7 @@ func (h *header) drawHeader(
 	lspErrorCount int,
 	hyperCredits *int,
 	gitBranch string,
+	runningSubAgents int,
 ) {
 	t := h.com.Styles
 	if width != h.width || compact != h.compact {
@@ -105,6 +108,7 @@ func (h *header) drawHeader(
 		availDetailWidth,
 		hyperCredits,
 		gitBranch,
+		runningSubAgents,
 	)
 
 	remainingWidth := width -
@@ -138,13 +142,22 @@ func renderHeaderDetails(
 	availWidth int,
 	hyperCredits *int,
 	gitBranch string,
+	runningSubAgents int,
 ) string {
 	t := com.Styles
 
 	var parts []string
 
+	// Subagents work out of sight in compact mode, so the header carries
+	// a live count of how many are still going.
+	if runningSubAgents > 0 {
+		parts = append(parts, t.Header.Percentage.Render(fmt.Sprintf(
+			"%s %d", subAgentSpinner(time.Now()), runningSubAgents,
+		)))
+	}
+
 	if lspErrorCount > 0 {
-		parts = append(parts, t.LSP.ErrorDiagnostic.Render(fmt.Sprintf("%s%d", styles.LSPErrorIcon, lspErrorCount)))
+		parts = append(parts, t.LSP.ErrorDiagnostic.Render(fmt.Sprintf("%s%d", nerdfont.Glyph(styles.LSPErrorIcon, "E"), lspErrorCount)))
 	}
 
 	agentCfg := com.Config().Agents[config.AgentCoder]
@@ -182,9 +195,9 @@ func renderHeaderDetails(
 	cwd := t.Header.WorkingDir.Render(fsext.DirTrim(fsext.PrettyPath(workingDir), dirTrimLimit))
 
 	if gitBranch != "" {
-		// Reserve space for the dot separator between branch and path and
+		// Reserve space for the separator between branch and path and
 		// at least some of the path.
-		branchSep := t.Header.Separator.Render(" • ")
+		branchSep := " "
 		metadataWidth := lipgloss.Width(metadata)
 		maxBranchWidth := max(0, availWidth-metadataWidth-lipgloss.Width(cwd)-lipgloss.Width(branchSep))
 		if maxBranchWidth > 0 {

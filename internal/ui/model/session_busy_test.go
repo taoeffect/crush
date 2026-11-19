@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
@@ -40,7 +41,7 @@ type countingWorkspace struct {
 
 	ready          bool
 	agentBusy      bool
-	yolo           bool
+	permMode       permission.PermissionMode
 	queued         []string
 	queuedMessages []agent.QueuedMessage
 	popErr         error
@@ -50,6 +51,10 @@ type countingWorkspace struct {
 	lspDiags       map[string]lsp.DiagnosticCounts
 	mcpStates      map[string]mcp.ClientInfo
 	mcpPendingAuth []mcp.PendingAuthServer
+	// cancelDropsQueue models a server cancel: every server prompt carries
+	// a run lifetime, and the cancelled turn drops the queued ones it
+	// covers.
+	cancelDropsQueue bool
 
 	readyCalls      int
 	agentBusyCalls  int
@@ -93,11 +98,14 @@ func (w *countingWorkspace) AgentQueuedPromptsList(string) []string {
 	return w.queued
 }
 
-func (w *countingWorkspace) PermissionSkipRequests() bool { w.permCalls++; return w.yolo }
+func (w *countingWorkspace) PermissionMode() permission.PermissionMode {
+	w.permCalls++
+	return w.permMode
+}
 
-func (w *countingWorkspace) PermissionSetSkipRequests(skip bool) {
+func (w *countingWorkspace) PermissionSetMode(mode permission.PermissionMode) {
 	w.permSetCalls++
-	w.yolo = skip
+	w.permMode = mode
 }
 
 // AgentClearQueue mirrors the production drain: it returns the messages it
@@ -133,10 +141,15 @@ func (w *countingWorkspace) AgentPopQueuedMessage(string) (agent.QueuedMessage, 
 	return queued, true, nil
 }
 
-// AgentCancel mirrors production: agent.sessionAgent.Cancel ends the turn
-// in progress and deliberately leaves the message queue alone, so w.queued
-// must stay untouched here. Only AgentClearQueue discards queued prompts.
-func (w *countingWorkspace) AgentCancel(string) { w.cancelCalls++ }
+// AgentCancel mirrors production: in process, agent.sessionAgent.Cancel ends
+// the turn in progress and leaves the message queue alone. Through a server
+// it drops the covered queue too, which cancelDropsQueue models.
+func (w *countingWorkspace) AgentCancel(string) {
+	w.cancelCalls++
+	if w.cancelDropsQueue {
+		w.queued, w.queuedMessages = nil, nil
+	}
+}
 
 func (w *countingWorkspace) AgentModel() workspace.AgentModel {
 	w.modelCalls++
@@ -253,7 +266,7 @@ func pinTTLs(t *testing.T) {
 // invalidation (not startup staleness) can trigger refresh dispatches.
 func warmCaches(m *UI, busy bool) {
 	m.agentBusyCache.set(busy)
-	m.yoloCache.set(false)
+	m.permModeCache.set(permission.PermissionModeNormal)
 	m.agentReady = true
 	m.promptQueueCheckedAt = time.Now()
 	m.lspCheckedAt = time.Now()
@@ -322,7 +335,7 @@ func TestReadsNeverProbeWorkspace(t *testing.T) {
 
 	for range 10 {
 		m.isAgentBusy()
-		m.yoloModeCached()
+		m.permModeCached()
 	}
 	require.Zero(t, ws.syncProbes(), "cache reads must never probe the workspace")
 }
@@ -374,7 +387,7 @@ func TestMessageCreatedEventRefreshesBusyAndQueue(t *testing.T) {
 
 	runCmds(m, cmd)
 	require.True(t, m.isAgentBusy(), "refreshed busy state must land in the cache")
-	require.Equal(t, 1, m.promptQueue, "refreshed queue count must land in the cache")
+	require.Equal(t, 1, m.promptQueue.Shown(), "refreshed queue count must land in the cache")
 	require.False(t, m.busyFetchInFlight)
 	require.False(t, m.promptQueueInFlight)
 }
@@ -417,69 +430,68 @@ func TestSessionSwitchRefreshesQueueAndBusy(t *testing.T) {
 	ws := &countingWorkspace{ready: true, queued: []string{"a", "b"}}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 5 // stale queue pill from the previous session
-	m.promptQueueItems = []string{"x", "y", "z", "w", "v"}
+	m.promptQueue.SetFetched([]string{"x", "y", "z", "w", "v"}) // stale queue pill from the previous session
 	ws.resetCounters()
 
 	_, cmd := m.Update(loadSessionMsg{session: &session.Session{ID: "s2"}})
-	require.Zero(t, m.promptQueue, "switching sessions must drop the old session's queue pill")
+	require.Zero(t, m.promptQueue.Shown(), "switching sessions must drop the old session's queue pill")
 	require.True(t, m.promptQueueInFlight, "session switch must schedule a queue refresh")
 	require.True(t, m.busyFetchInFlight, "session switch must schedule a busy refresh")
 
 	runCmds(m, cmd)
-	require.Equal(t, 2, m.promptQueue, "the new session's queue must be fetched")
-	require.Equal(t, []string{"a", "b"}, m.promptQueueItems)
+	require.Equal(t, 2, m.promptQueue.Shown(), "the new session's queue must be fetched")
+	require.Equal(t, []string{"a", "b"}, m.promptQueue.Items())
 }
 
-// TestToggleYoloWritesThroughCache: both yolo toggle paths share
-// toggleYoloMode, which must write the known new value through the cache —
+// TestToggleYoloWritesThroughCache: both permission-mode toggle paths share
+// toggleMode, which must write the known new value through the cache —
 // no invalidation, no re-probe.
 func TestToggleYoloWritesThroughCache(t *testing.T) {
 	pinTTLs(t)
 
-	ws := &countingWorkspace{ready: true, yolo: false}
+	ws := &countingWorkspace{ready: true, permMode: permission.PermissionModeNormal}
 	m := newBusyUI(ws)
 
-	got := m.toggleYoloMode()
+	got := m.toggleMode(permission.PermissionModeYolo)
 	require.True(t, got)
 	require.Equal(t, 1, ws.permSetCalls)
 	readsAfterToggle := ws.permCalls
 	require.Equal(t, 1, readsAfterToggle, "toggle reads the authoritative value exactly once")
 
-	require.True(t, m.yoloModeCached(), "the new value must be served from the cache")
-	require.True(t, m.yoloCache.fresh(busyCacheTTL), "write-through must stamp the cache fresh")
-	m.yoloModeCached()
+	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(), "the new value must be served from the cache")
+	require.True(t, m.permModeCache.fresh(busyCacheTTL), "write-through must stamp the cache fresh")
+	m.permModeCached()
 	require.Equal(t, readsAfterToggle, ws.permCalls, "reads after the toggle must not re-probe")
 
-	got = m.toggleYoloMode()
+	got = m.toggleMode(permission.PermissionModeYolo)
 	require.False(t, got)
-	require.False(t, m.yoloModeCached())
+	require.Equal(t, permission.PermissionModeNormal, m.permModeCached())
 }
 
 // TestLocalYoloToggleSupersedesInFlightProbe pins the generation bump in
-// toggleYoloMode: a busy/yolo probe dispatched before the toggle carries the
-// old generation. Without advancing busyFetchGen its stale result would land
-// with a still-matching generation and clobber the just-toggled value.
+// toggleMode: a busy/permission probe dispatched before the toggle carries
+// the old generation. Without advancing busyFetchGen its stale result would
+// land with a still-matching generation and clobber the just-toggled value.
 func TestLocalYoloToggleSupersedesInFlightProbe(t *testing.T) {
 	pinTTLs(t)
 
-	ws := &countingWorkspace{ready: true, yolo: false}
+	ws := &countingWorkspace{ready: true, permMode: permission.PermissionModeNormal}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
 
-	// A busy/yolo probe carrying the pre-toggle generation is in flight.
+	// A busy/permission probe carrying the pre-toggle generation is in flight.
 	m.busyFetchInFlight = true
 	staleGen := m.busyFetchGen
 
-	require.True(t, m.toggleYoloMode())
+	require.True(t, m.toggleMode(permission.PermissionModeYolo))
 	require.NotEqual(t, staleGen, m.busyFetchGen,
 		"toggle must advance the busy generation to supersede in-flight probes")
-	require.True(t, m.yoloModeCached(), "toggle must write the new value through the cache")
+	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(), "toggle must write the new value through the cache")
 
-	// The stale probe (old generation, old yolo=false) lands.
+	// The stale probe (old generation, old mode=normal) lands.
 	m.busyFetchInFlight = true
-	cmds := m.applyBusyState(busyStateMsg{gen: staleGen, yolo: false})
-	require.True(t, m.yoloModeCached(),
+	cmds := m.applyBusyState(busyStateMsg{gen: staleGen, permMode: permission.PermissionModeNormal})
+	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(),
 		"stale probe must not overwrite the freshly toggled value")
 	require.NotEmpty(t, cmds, "stale probe must re-dispatch an authoritative refresh")
 	require.True(t, m.busyFetchInFlight, "re-dispatched refresh must be in flight")
@@ -504,7 +516,7 @@ func TestSendMessageSetsOptimisticBusy(t *testing.T) {
 
 	// esc right after enter: isAgentBusy gates cancelAgent, first press
 	// arms the double-press cancel.
-	require.Zero(t, m.promptQueue)
+	require.Zero(t, m.promptQueue.Shown())
 	m.cancelAgent()
 	require.True(t, m.isCanceling, "first esc press must arm cancellation")
 
@@ -516,45 +528,44 @@ func TestSendMessageSetsOptimisticBusy(t *testing.T) {
 // TestCancelAgentDrainsQueueOnConfirmingPress pins the two halves of the esc
 // gesture at the cancelAgent level: the arming press is queue-neutral (it
 // must not touch the queue or probe it — the user may still let the window
-// expire), and the confirming press cancels the turn and dispatches the
-// drain, because cancellation is turn-scoped and would otherwise leave the
-// queue ownerless. The agent side of the contract — Cancel leaving the queue
-// intact — is pinned by agent.TestCancel_PreservesQueuedPrompts; the stub
-// here only models it.
+// expire), and the confirming press drains the queue and then cancels the
+// turn, because cancellation is turn-scoped and would otherwise leave the
+// queue ownerless. The drain goes first: a server cancel drops the queued
+// prompts it covers.
 func TestCancelAgentDrainsQueueOnConfirmingPress(t *testing.T) {
 	pinTTLs(t)
 
 	ws := &countingWorkspace{
-		ready:          true,
-		queued:         []string{"a"},
-		queuedMessages: []agent.QueuedMessage{{Prompt: "a"}},
+		ready:            true,
+		queued:           []string{"a"},
+		queuedMessages:   []agent.QueuedMessage{{Prompt: "a"}},
+		cancelDropsQueue: true,
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"a"}
+	m.promptQueue.SetFetched([]string{"a"})
 	ws.resetCounters()
 
 	cmd := m.cancelAgent()
 	require.NotNil(t, cmd, "first esc press must arm the cancellation timer")
 	require.True(t, m.isCanceling)
 	require.Equal(t, []string{"a"}, ws.queued)
-	require.Equal(t, 1, m.promptQueue)
-	require.Equal(t, []string{"a"}, m.promptQueueItems)
+	require.Equal(t, 1, m.promptQueue.Shown())
+	require.Equal(t, []string{"a"}, m.promptQueue.Items())
 	require.Zero(t, ws.clearQueueCalls, "the arming press must not drain the queue")
 	require.Zero(t, ws.queuedCalls, "esc must not probe the queue")
 	require.Zero(t, ws.queueListCalls, "esc must not probe the queue")
 
 	cmd = m.cancelAgent()
 	require.False(t, m.isCanceling)
-	require.Equal(t, 1, ws.cancelCalls, "second esc press must cancel the agent")
 	require.Zero(t, ws.clearQueueCalls, "the drain must run off the Update goroutine")
 
 	runCmds(m, cmd)
 	require.Equal(t, 1, ws.clearQueueCalls, "the confirming press must drain the queue")
+	require.Equal(t, 1, ws.cancelCalls, "the confirming press must cancel the agent")
 	require.Empty(t, ws.queued)
 	require.Equal(t, "a", m.textarea.Value(), "the drained prompt must reach the editor")
-	require.Zero(t, m.promptQueue)
+	require.Zero(t, m.promptQueue.Shown())
 }
 
 func cancelHelp(t *testing.T, binds []key.Binding) string {
@@ -578,8 +589,7 @@ func TestCancelHelpStaysOneWord(t *testing.T) {
 	ws := &countingWorkspace{ready: true, agentBusy: true, queued: []string{"a", "b"}}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"a", "b"}
+	m.promptQueue.SetFetched([]string{"a", "b"})
 
 	require.Equal(t, "cancel", cancelHelp(t, m.ShortHelp()),
 		"short help must not grow a queue clause")
@@ -656,17 +666,17 @@ func TestSetSessionMessagesGatesAnimationsOnBusy(t *testing.T) {
 	// animation clock so the ghost spinner stays still.
 	cmd := m.setSessionMessages(msgs)
 	require.Nil(t, cmd, "setSessionMessages must not start animations when agent is idle")
-	require.False(t, m.chat.animAllowed, "an idle session reload must freeze the animation clock")
-	require.Nil(t, m.chat.EnsureAnimating(), "a frozen clock must not arm while idle")
-	require.False(t, m.chat.animRunning)
+	require.True(t, m.animClock.frozen, "an idle session reload must freeze the animation clock")
+	require.Nil(t, m.ensureAnimating(), "a frozen clock must not arm while idle")
+	require.False(t, m.animClock.running)
 
 	// When the agent is busy, the clock may run for the same message.
 	warmCaches(m, true)
 	cmd = m.setSessionMessages(msgs)
 	require.Nil(t, cmd, "setSessionMessages must not arm the clock itself")
-	require.True(t, m.chat.animAllowed, "setSessionMessages must allow animations when agent is busy")
-	require.NotNil(t, m.chat.EnsureAnimating(), "a visible spinning message must arm the clock")
-	require.True(t, m.chat.animRunning)
+	require.False(t, m.animClock.frozen, "setSessionMessages must allow animations when agent is busy")
+	require.NotNil(t, m.ensureAnimating(), "a visible spinning message must arm the clock")
+	require.True(t, m.animClock.running)
 }
 
 // TestBusyProbeReEnablesFrozenAnimationClock pins the boot race: a session
@@ -698,21 +708,21 @@ func TestBusyProbeReEnablesFrozenAnimationClock(t *testing.T) {
 	require.False(t, m.isAgentBusy(), "boot: the memoized busy state is not populated yet")
 	cmd := m.setSessionMessages(msgs)
 	require.Nil(t, cmd)
-	require.False(t, m.chat.animAllowed, "the boot reload must freeze the clock off the unpopulated cache")
-	require.Nil(t, m.chat.EnsureAnimating(), "the frozen clock must not arm")
-	require.False(t, m.chat.animRunning)
+	require.True(t, m.animClock.frozen, "the boot reload must freeze the clock off the unpopulated cache")
+	require.Nil(t, m.ensureAnimating(), "the frozen clock must not arm")
+	require.False(t, m.animClock.running)
 
 	// The authoritative probe lands: the agent is busy. The gate must
 	// re-open so the visible spinner ticks.
 	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, ready: true, agentBusy: true})
-	require.True(t, m.chat.animAllowed, "a busy probe must re-enable the animation gate")
-	require.NotNil(t, m.chat.EnsureAnimating(), "a visible spinning item must arm the clock once allowed")
-	require.True(t, m.chat.animRunning)
+	require.False(t, m.animClock.frozen, "a busy probe must re-enable the animation gate")
+	require.NotNil(t, m.ensureAnimating(), "a visible spinning item must arm the clock once allowed")
+	require.True(t, m.animClock.running)
 
 	// An idle probe must not re-freeze the clock on its own: the ghost
 	// guard belongs to the session reload, not to the probe.
 	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, ready: true, agentBusy: false})
-	require.True(t, m.chat.animAllowed, "an idle probe must leave the gate alone")
+	require.False(t, m.animClock.frozen, "an idle probe must leave the gate alone")
 }
 
 // TestStaleBusyRefreshDiscardedAndReDispatched pins the generation guard for
@@ -758,16 +768,14 @@ func TestStalePromptQueueDiscardedAndReDispatched(t *testing.T) {
 	ws := &countingWorkspace{ready: true, queued: []string{"real"}}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"real"}
+	m.promptQueue.SetFetched([]string{"real"})
 
 	// A fetch is in flight; capture its generation, then a newer transition
 	// (esc drains the queue) supersedes it.
 	m.promptQueueInFlight = true
 	staleGen := m.promptQueueGen
 	m.invalidatePromptQueue()
-	m.promptQueue = 0
-	m.promptQueueItems = nil
+	m.promptQueue.ClearServer()
 
 	// The stale fetch (still saw one prompt) lands for the same session.
 	cmds := m.applyPromptQueue(promptQueueMsg{
@@ -775,9 +783,9 @@ func TestStalePromptQueueDiscardedAndReDispatched(t *testing.T) {
 		gen:        staleGen,
 		prompts:    []string{"stale"},
 	})
-	require.Zero(t, m.promptQueue,
+	require.Zero(t, m.promptQueue.Shown(),
 		"a stale queue result must not repopulate the cleared queue")
-	require.Empty(t, m.promptQueueItems)
+	require.Empty(t, m.promptQueue.Items())
 	require.NotEmpty(t, cmds,
 		"a stale queue result must re-dispatch the authoritative fetch")
 	require.True(t, m.promptQueueInFlight, "the re-dispatched fetch must be in flight")
@@ -801,7 +809,7 @@ func TestStalePromptQueuePreservesSessionScoping(t *testing.T) {
 		gen:        gen,
 		prompts:    []string{"from other session"},
 	})
-	require.Zero(t, m.promptQueue,
+	require.Zero(t, m.promptQueue.Shown(),
 		"a result from a different session must never populate the queue")
 	require.NotEmpty(t, cmds, "a session-mismatched result must re-fetch for the current session")
 }
@@ -984,13 +992,13 @@ func TestRemoteYoloToggleUpdatesEditorPrompt(t *testing.T) {
 	m := newBusyUI(ws)
 	m.textarea.Focus()
 	m.textarea.SetWidth(40)
-	m.yoloCache.set(false)
-	m.setEditorPrompt(false)
+	m.permModeCache.set(permission.PermissionModeNormal)
+	m.setEditorPrompt(permission.PermissionModeNormal)
 	normalPrompt := ansi.Strip(m.textarea.View())
 
 	// A remote toggle flips yolo on; delivered via an off-thread refresh.
-	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, yolo: true})
-	require.True(t, m.yoloModeCached(), "the refresh must write the new yolo value through the cache")
+	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, permMode: permission.PermissionModeYolo})
+	require.Equal(t, permission.PermissionModeYolo, m.permModeCached(), "the refresh must write the new mode through the cache")
 	yoloPrompt := ansi.Strip(m.textarea.View())
 	require.NotEqual(t, normalPrompt, yoloPrompt,
 		"a remote yolo toggle must change the rendered editor prompt")
@@ -998,8 +1006,8 @@ func TestRemoteYoloToggleUpdatesEditorPrompt(t *testing.T) {
 		"the yolo prompt icon must render after a remote toggle")
 
 	// Flipping back off must restore the normal prompt.
-	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, yolo: false})
-	require.False(t, m.yoloModeCached())
+	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, permMode: permission.PermissionModeNormal})
+	require.Equal(t, permission.PermissionModeNormal, m.permModeCached())
 	require.Equal(t, normalPrompt, ansi.Strip(m.textarea.View()),
 		"toggling yolo off must restore the normal editor prompt")
 }
@@ -1026,8 +1034,7 @@ func TestPopQueuedMessageKeysRestoreNewestMessage(t *testing.T) {
 			}
 			m := newBusyUI(ws)
 			warmCaches(m, true)
-			m.promptQueue = 2
-			m.promptQueueItems = []string{"older", "newest"}
+			m.promptQueue.SetFetched([]string{"older", "newest"})
 
 			_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tc.mod})
 			require.Zero(t, ws.popQueueCalls, "pop must run asynchronously")
@@ -1039,8 +1046,8 @@ func TestPopQueuedMessageKeysRestoreNewestMessage(t *testing.T) {
 			require.Equal(t, []message.Attachment{attachment}, m.attachments.List())
 			require.Equal(t, -1, m.promptHistory.index)
 			require.Equal(t, "newest", m.promptHistory.draft)
-			require.Equal(t, []string{"older"}, m.promptQueueItems)
-			require.Equal(t, 1, m.promptQueue)
+			require.Equal(t, []string{"older"}, m.promptQueue.Items())
+			require.Equal(t, 1, m.promptQueue.Shown())
 			require.Equal(t, []string{"older"}, ws.queued)
 		})
 	}
@@ -1061,8 +1068,7 @@ func TestPopQueuedMessagePrependsAboveDraft(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueue.SetFetched([]string{"older", "newest"})
 	m.textarea.SetValue("draft")
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
@@ -1080,8 +1086,8 @@ func TestPopQueuedMessagePrependsAboveDraft(t *testing.T) {
 
 	require.Equal(t, 2, ws.popQueueCalls)
 	require.Equal(t, "older\n\nnewest\n\ndraft", m.textarea.Value())
-	require.Empty(t, m.promptQueueItems)
-	require.Zero(t, m.promptQueue)
+	require.Empty(t, m.promptQueue.Items())
+	require.Zero(t, m.promptQueue.Shown())
 
 	// The queue is empty now: the press reports that and leaves the buffer.
 	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
@@ -1120,8 +1126,7 @@ func TestPopQueuedMessageKeepsTextTypedWhileInFlight(t *testing.T) {
 			}
 			m := newBusyUI(ws)
 			warmCaches(m, true)
-			m.promptQueue = 1
-			m.promptQueueItems = []string{"queued prompt"}
+			m.promptQueue.SetFetched([]string{"queued prompt"})
 			m.bangMode = tc.bangMode
 
 			_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
@@ -1136,7 +1141,7 @@ func TestPopQueuedMessageKeepsTextTypedWhileInFlight(t *testing.T) {
 				"a restored prompt is prompt text, so bang mode must not survive it")
 			require.Equal(t, -1, m.promptHistory.index)
 			require.Equal(t, tc.want, m.promptHistory.draft)
-			require.Empty(t, m.promptQueueItems)
+			require.Empty(t, m.promptQueue.Items())
 			require.Empty(t, ws.queued)
 		})
 	}
@@ -1154,8 +1159,7 @@ func TestPopQueuedMessageAppendsAttachmentsAndSynchronizesBangMode(t *testing.T)
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"!echo queued"}
+	m.promptQueue.SetFetched([]string{"!echo queued"})
 	m.attachments.Update(existing)
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
@@ -1224,8 +1228,7 @@ func TestPopQueuedMessageSkipsAttachmentsAlreadyOnEditor(t *testing.T) {
 			}
 			m := newBusyUI(ws)
 			warmCaches(m, true)
-			m.promptQueue = 1
-			m.promptQueueItems = []string{"queued prompt"}
+			m.promptQueue.SetFetched([]string{"queued prompt"})
 			m.attachments.Update(tc.held)
 
 			_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
@@ -1248,8 +1251,7 @@ func TestPopQueuedMessageEmptyQueueIsAnsweredFromCache(t *testing.T) {
 	ws := &countingWorkspace{ready: true}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 0
-	m.promptQueueItems = nil
+	m.promptQueue.Reset()
 	gen := m.promptQueueGen
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
@@ -1275,8 +1277,7 @@ func TestPopQueuedMessageStaleCountReportsEmptyQueue(t *testing.T) {
 	ws := &countingWorkspace{ready: true}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"already dequeued"}
+	m.promptQueue.SetFetched([]string{"already dequeued"})
 	staleGen := m.promptQueueGen
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
@@ -1288,8 +1289,8 @@ func TestPopQueuedMessageStaleCountReportsEmptyQueue(t *testing.T) {
 	require.Empty(t, m.textarea.Value())
 	require.Greater(t, m.promptQueueGen, staleGen,
 		"a queue the server says is empty must supersede the memoized one")
-	require.Zero(t, m.promptQueue, "the re-fetch must drop the phantom queue pill")
-	require.Empty(t, m.promptQueueItems)
+	require.Zero(t, m.promptQueue.Shown(), "the re-fetch must drop the phantom queue pill")
+	require.Empty(t, m.promptQueue.Items())
 	require.False(t, m.queuedPopInFlight, "an empty-queue result must clear the in-flight mark")
 }
 
@@ -1302,13 +1303,12 @@ func TestPopQueuedMessageEmptyResultAfterSessionSwitchKeepsCurrentQueue(t *testi
 	ws := &countingWorkspace{ready: true, queued: []string{"a"}}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"a"}
+	m.promptQueue.SetFetched([]string{"a"})
 	gen := m.promptQueueGen
 
 	require.Nil(t, m.applyQueuedMessagePop(queuedMessagePoppedMsg{forSession: "s0"}))
-	require.Equal(t, []string{"a"}, m.promptQueueItems)
-	require.Equal(t, 1, m.promptQueue)
+	require.Equal(t, []string{"a"}, m.promptQueue.Items())
+	require.Equal(t, 1, m.promptQueue.Shown())
 	require.Equal(t, gen, m.promptQueueGen)
 	require.Zero(t, ws.queueListCalls, "another session's empty pop must not re-fetch this queue")
 }
@@ -1341,8 +1341,7 @@ func TestPopQueuedMessageHelpListsBindingWhenQueued(t *testing.T) {
 	ws := &countingWorkspace{ready: true, queued: []string{"older", "newest"}}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueue.SetFetched([]string{"older", "newest"})
 
 	require.Equal(t, desc, helpDesc(m.FullHelp(), "shift+↑"),
 		"full help must list the pop binding while prompts are queued")
@@ -1361,8 +1360,7 @@ func TestPopQueuedMessageHelpListsBindingWhenQueued(t *testing.T) {
 	m.focus = uiFocusEditor
 
 	// Nothing queued: nothing to pop.
-	m.promptQueue = 0
-	m.promptQueueItems = nil
+	m.promptQueue.Reset()
 	require.Empty(t, helpDesc(m.FullHelp(), "shift+↑"),
 		"full help must not list the pop with an empty queue")
 }
@@ -1382,8 +1380,7 @@ func TestPopQueuedMessageIsSingleFlight(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueue.SetFetched([]string{"older", "newest"})
 
 	_, first := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
 	require.True(t, m.queuedPopInFlight, "the dispatched pop must be marked in flight")
@@ -1394,8 +1391,8 @@ func TestPopQueuedMessageIsSingleFlight(t *testing.T) {
 	require.Equal(t, 1, ws.popQueueCalls, "autorepeat must not pop twice")
 	require.False(t, m.queuedPopInFlight, "the result must clear the in-flight mark")
 	require.Equal(t, "newest", m.textarea.Value())
-	require.Equal(t, []string{"older"}, m.promptQueueItems)
-	require.Equal(t, 1, m.promptQueue)
+	require.Equal(t, []string{"older"}, m.promptQueue.Items())
+	require.Equal(t, 1, m.promptQueue.Shown())
 	require.Equal(t, []string{"older"}, ws.queued)
 
 	// A later press is allowed once the first pop settled, and it prepends
@@ -1420,8 +1417,7 @@ func TestPopQueuedMessageReportsWorkspaceError(t *testing.T) {
 	ws := &countingWorkspace{ready: true, popErr: errors.New("pop failed"), queued: []string{"older"}}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueue.SetFetched([]string{"older", "newest"})
 	staleGen := m.promptQueueGen
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
@@ -1434,9 +1430,9 @@ func TestPopQueuedMessageReportsWorkspaceError(t *testing.T) {
 		"a failed pop must clear the in-flight mark so the key is not wedged")
 	require.Greater(t, m.promptQueueGen, staleGen,
 		"an unknown queue state must supersede the memoized one")
-	require.Equal(t, []string{"older"}, m.promptQueueItems,
+	require.Equal(t, []string{"older"}, m.promptQueue.Items(),
 		"the re-fetch must replace the queue the pop may have shortened")
-	require.Equal(t, 1, m.promptQueue)
+	require.Equal(t, 1, m.promptQueue.Shown())
 }
 
 // TestPopQueuedMessageParksResultAfterSessionSwitch pins the session-switch
@@ -1459,8 +1455,7 @@ func TestPopQueuedMessageParksResultAfterSessionSwitch(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueue.SetFetched([]string{"older", "newest"})
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
 	// The user switches sessions while the pop is in flight.
@@ -1513,8 +1508,7 @@ func TestParksAccumulateAcrossPopAndDrain(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 3
-	m.promptQueueItems = []string{"drained-older", "drained-newer", "popped"}
+	m.promptQueue.SetFetched([]string{"drained-older", "drained-newer", "popped"})
 
 	// Both ops are dispatched against s1 and are still in flight when the
 	// user switches away: the pop takes the newest prompt, the Escape drain
@@ -1595,22 +1589,21 @@ func TestPopQueuedMessageSupersedesInFlightQueueRefresh(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueue.SetFetched([]string{"older", "newest"})
 	m.promptQueueInFlight = true
 	staleGen := m.promptQueueGen
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
 	runCmds(m, cmd)
 
-	require.Equal(t, []string{"older"}, m.promptQueueItems)
+	require.Equal(t, []string{"older"}, m.promptQueue.Items())
 	require.Greater(t, m.promptQueueGen, staleGen)
 	cmds := m.applyPromptQueue(promptQueueMsg{
 		forSession: "s1",
 		gen:        staleGen,
 		prompts:    []string{"older", "newest"},
 	})
-	require.Equal(t, []string{"older"}, m.promptQueueItems)
+	require.Equal(t, []string{"older"}, m.promptQueue.Items())
 	require.NotEmpty(t, cmds)
 }
 
@@ -1643,8 +1636,7 @@ func TestClearQueueCommandDiscardsQueue(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"a", "b"}
+	m.promptQueue.SetFetched([]string{"a", "b"})
 	m.textarea.SetValue("draft")
 	staleGen := m.promptQueueGen
 	m.dialog.OpenDialog(&actionDialog{id: dialog.CommandsID, action: dialog.ActionClearQueue{}})
@@ -1658,8 +1650,8 @@ func TestClearQueueCommandDiscardsQueue(t *testing.T) {
 
 	require.Equal(t, 1, ws.clearQueueCalls)
 	require.Empty(t, ws.queued, "the agent queue must be discarded")
-	require.Empty(t, m.promptQueueItems)
-	require.Zero(t, m.promptQueue)
+	require.Empty(t, m.promptQueue.Items())
+	require.Zero(t, m.promptQueue.Shown())
 	require.Greater(t, m.promptQueueGen, staleGen,
 		"the clear must supersede queue reads started before it")
 	require.Equal(t, 1, ws.queueListCalls,
@@ -1684,16 +1676,15 @@ func TestClearQueueResultAfterSessionSwitchKeepsCurrentQueue(t *testing.T) {
 	ws := &countingWorkspace{ready: true, queued: []string{"a"}}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"a"}
+	m.promptQueue.SetFetched([]string{"a"})
 
 	require.Nil(t, m.applyPromptQueueCleared(promptQueueClearedMsg{
 		forSession: "s0",
 		messages:   []agent.QueuedMessage{{Prompt: "discarded"}},
 	}))
-	require.Equal(t, []string{"a"}, m.promptQueueItems,
+	require.Equal(t, []string{"a"}, m.promptQueue.Items(),
 		"another session's clear must not empty this session's queue")
-	require.Equal(t, 1, m.promptQueue)
+	require.Equal(t, 1, m.promptQueue.Shown())
 	require.Empty(t, m.queuedRestoreOrphans, "a discard must not park anything")
 	require.Empty(t, m.textarea.Value())
 }
@@ -1717,8 +1708,7 @@ func TestEscapeDrainResultAfterSessionSwitchParksBatch(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueue.SetFetched([]string{"older", "newest"})
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	// The user switches sessions while the drain is in flight.
@@ -1764,8 +1754,7 @@ func TestEscapeDrainReportsWorkspaceError(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"older", "newest"}
+	m.promptQueue.SetFetched([]string{"older", "newest"})
 	m.textarea.SetValue("draft")
 	staleGen := m.promptQueueGen
 	ws.resetCounters()
@@ -1782,9 +1771,9 @@ func TestEscapeDrainReportsWorkspaceError(t *testing.T) {
 		"an unknown queue state must supersede the memoized one")
 	require.Equal(t, 1, ws.queueListCalls,
 		"the unknown queue state must be replaced by one authoritative re-fetch")
-	require.Equal(t, []string{"newest"}, m.promptQueueItems,
+	require.Equal(t, []string{"newest"}, m.promptQueue.Items(),
 		"the re-fetch must replace the queue the drain may have emptied")
-	require.Equal(t, 1, m.promptQueue)
+	require.Equal(t, 1, m.promptQueue.Shown())
 	require.Equal(t, "draft", m.textarea.Value(),
 		"a failed drain restores nothing: the editor must be left alone")
 	require.Empty(t, m.attachments.List())
@@ -1813,8 +1802,7 @@ func TestIdleEscapeDrainsQueueIntoEditor(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"a", "b"}
+	m.promptQueue.SetFetched([]string{"a", "b"})
 	m.textarea.SetValue("draft")
 	ws.resetCounters()
 
@@ -1827,8 +1815,8 @@ func TestIdleEscapeDrainsQueueIntoEditor(t *testing.T) {
 
 	require.Equal(t, 1, ws.clearQueueCalls)
 	require.Empty(t, ws.queued, "the queue must leave the agent")
-	require.Empty(t, m.promptQueueItems)
-	require.Zero(t, m.promptQueue)
+	require.Empty(t, m.promptQueue.Items())
+	require.Zero(t, m.promptQueue.Shown())
 	require.Equal(t, "a\n\nb\n\ndraft", m.textarea.Value(),
 		"the drained prompts must land above the draft, oldest first")
 	require.True(t, m.isAtEditorEnd())
@@ -1866,8 +1854,7 @@ func TestIdleEscapeDrainRestoresAttachmentOnlyMessage(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{""}
+	m.promptQueue.SetFetched([]string{""})
 	// The user has just typed "!": bang mode is armed and the textarea is
 	// empty, because the leading "!" is not part of its value.
 	m.bangMode = true
@@ -1911,8 +1898,7 @@ func TestIdleEscapeDrainRestoresTheSameAttachmentTwiceInOneBatch(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"first", "second"}
+	m.promptQueue.SetFetched([]string{"first", "second"})
 	ws.resetCounters()
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -1937,8 +1923,7 @@ func TestIdleEscapeDrainWithStaleCountReportsEmptyQueue(t *testing.T) {
 	ws := &countingWorkspace{ready: true}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"a"}
+	m.promptQueue.SetFetched([]string{"a"})
 	m.textarea.SetValue("draft")
 	ws.resetCounters()
 
@@ -1950,8 +1935,8 @@ func TestIdleEscapeDrainWithStaleCountReportsEmptyQueue(t *testing.T) {
 	require.Equal(t, noQueuedMessages, m.status.msg.Msg,
 		"an empty drain must not claim prompts were moved into the input field")
 	require.Equal(t, "draft", m.textarea.Value(), "an empty drain restores nothing")
-	require.Empty(t, m.promptQueueItems)
-	require.Zero(t, m.promptQueue)
+	require.Empty(t, m.promptQueue.Items())
+	require.Zero(t, m.promptQueue.Shown())
 	require.False(t, m.queueClearInFlight)
 	require.Empty(t, m.queuedRestoreOrphans, "an empty drain must not park anything")
 }
@@ -1993,8 +1978,7 @@ func TestBusyEscapeCancelsAndDrainsQueue(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"a", "b"}
+	m.promptQueue.SetFetched([]string{"a", "b"})
 	m.textarea.SetValue("draft")
 	ws.resetCounters()
 
@@ -2005,20 +1989,20 @@ func TestBusyEscapeCancelsAndDrainsQueue(t *testing.T) {
 	require.NotNil(t, cmd, "the first esc press must return the arming timer")
 	require.True(t, m.isCanceling, "the first esc press must arm cancellation")
 	require.Zero(t, ws.clearQueueCalls, "the arming press must be queue-neutral")
-	require.Equal(t, []string{"a", "b"}, m.promptQueueItems)
+	require.Equal(t, []string{"a", "b"}, m.promptQueue.Items())
 	require.Equal(t, "draft", m.textarea.Value())
 
 	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	require.Equal(t, 1, ws.cancelCalls, "the second esc press must cancel the agent")
 	require.Zero(t, ws.clearQueueCalls, "the drain must run off the Update goroutine")
 
 	runCmds(m, cmd)
 
 	require.Equal(t, 1, ws.clearQueueCalls, "the confirming press must drain the queue")
+	require.Equal(t, 1, ws.cancelCalls, "the confirming press must cancel the agent")
 	require.Equal(t, "a\n\nb\n\ndraft", m.textarea.Value())
 	require.Equal(t, []message.Attachment{attachment}, m.attachments.List())
-	require.Empty(t, m.promptQueueItems)
-	require.Zero(t, m.promptQueue)
+	require.Empty(t, m.promptQueue.Items())
+	require.Zero(t, m.promptQueue.Shown())
 }
 
 // TestIdleEscapeDuringHistoryNavigationKeepsQueue: esc keeps its more
@@ -2034,8 +2018,7 @@ func TestIdleEscapeDuringHistoryNavigationKeepsQueue(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"a"}
+	m.promptQueue.SetFetched([]string{"a"})
 	m.promptHistory.messages = []string{"older prompt"}
 	m.promptHistory.index = 0
 	m.promptHistory.draft = "draft"
@@ -2046,7 +2029,7 @@ func TestIdleEscapeDuringHistoryNavigationKeepsQueue(t *testing.T) {
 	runCmds(m, cmd)
 
 	require.Zero(t, ws.clearQueueCalls, "esc must leave history navigation first")
-	require.Equal(t, []string{"a"}, m.promptQueueItems)
+	require.Equal(t, []string{"a"}, m.promptQueue.Items())
 	require.Equal(t, "draft", m.textarea.Value(), "esc must restore the draft")
 	require.Equal(t, -1, m.promptHistory.index)
 
@@ -2054,7 +2037,7 @@ func TestIdleEscapeDuringHistoryNavigationKeepsQueue(t *testing.T) {
 	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	runCmds(m, cmd)
 	require.Equal(t, 1, ws.clearQueueCalls)
-	require.Empty(t, m.promptQueueItems)
+	require.Empty(t, m.promptQueue.Items())
 	require.Equal(t, "a\n\ndraft", m.textarea.Value())
 }
 
@@ -2080,8 +2063,7 @@ func TestIdleEscapeDuringAttachmentDeleteModeKeepsQueue(t *testing.T) {
 		Escape:     m.keyMap.Editor.Escape,
 	})
 	warmCaches(m, false)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"a"}
+	m.promptQueue.SetFetched([]string{"a"})
 	m.textarea.SetValue("draft")
 	m.attachments.Update(message.Attachment{FileName: "notes.txt"})
 	ws.resetCounters()
@@ -2097,7 +2079,7 @@ func TestIdleEscapeDuringAttachmentDeleteModeKeepsQueue(t *testing.T) {
 
 	require.False(t, m.attachments.Deleting(), "esc must back out of delete mode")
 	require.Zero(t, ws.clearQueueCalls, "esc must leave delete mode first")
-	require.Equal(t, []string{"a"}, m.promptQueueItems)
+	require.Equal(t, []string{"a"}, m.promptQueue.Items())
 	require.Equal(t, "draft", m.textarea.Value(), "the queue must stay off the editor")
 	require.Len(t, m.attachments.List(), 1, "backing out must keep the attachment")
 
@@ -2105,7 +2087,7 @@ func TestIdleEscapeDuringAttachmentDeleteModeKeepsQueue(t *testing.T) {
 	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	runCmds(m, cmd)
 	require.Equal(t, 1, ws.clearQueueCalls)
-	require.Empty(t, m.promptQueueItems)
+	require.Empty(t, m.promptQueue.Items())
 	require.Equal(t, "a\n\ndraft", m.textarea.Value())
 }
 
@@ -2124,8 +2106,7 @@ func TestIdleEscapeWithCompletionsOpenKeepsQueue(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"a"}
+	m.promptQueue.SetFetched([]string{"a"})
 	m.textarea.SetValue("look at @")
 	// The shared harness leaves the completions component nil, and the "@"
 	// keystroke that opens it in production needs both a config (for the
@@ -2151,14 +2132,14 @@ func TestIdleEscapeWithCompletionsOpenKeepsQueue(t *testing.T) {
 
 	require.False(t, m.completionsOpen, "esc must close the completions popup")
 	require.Zero(t, ws.clearQueueCalls, "esc must close the popup first")
-	require.Equal(t, []string{"a"}, m.promptQueueItems)
+	require.Equal(t, []string{"a"}, m.promptQueue.Items())
 	require.Equal(t, "look at @", m.textarea.Value(), "the queue must stay off the editor")
 
 	// A second press, now that the popup is closed, drains.
 	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	runCmds(m, cmd)
 	require.Equal(t, 1, ws.clearQueueCalls)
-	require.Empty(t, m.promptQueueItems)
+	require.Empty(t, m.promptQueue.Items())
 	require.Equal(t, "a\n\nlook at @", m.textarea.Value())
 }
 
@@ -2179,8 +2160,7 @@ func TestIdleEscapeDrainIsSingleFlight(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
-	m.promptQueue = 2
-	m.promptQueueItems = []string{"a", "b"}
+	m.promptQueue.SetFetched([]string{"a", "b"})
 	m.textarea.SetValue("draft")
 	ws.resetCounters()
 
@@ -2203,8 +2183,7 @@ func TestIdleEscapeDrainIsSingleFlight(t *testing.T) {
 	// again drains as usual.
 	ws.queued = []string{"c"}
 	ws.queuedMessages = []agent.QueuedMessage{{Prompt: "c"}}
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"c"}
+	m.promptQueue.SetFetched([]string{"c"})
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	runCmds(m, cmd)
@@ -2215,7 +2194,7 @@ func TestIdleEscapeDrainIsSingleFlight(t *testing.T) {
 
 // TestBusyEscapeDrainIsSingleFlightAcrossTheBusyEdge covers the other way
 // the same drain re-fires: the busy double-press drains on its confirming
-// press, the cancel makes the session read idle before the round-trip
+// press, the turn ends and the session reads idle before the round-trip
 // returns, and the next press of the "esc esc esc" mash the double-press
 // machine trains takes the *idle* branch on the still-non-zero memoized
 // count.
@@ -2230,8 +2209,7 @@ func TestBusyEscapeDrainIsSingleFlightAcrossTheBusyEdge(t *testing.T) {
 	}
 	m := newBusyUI(ws)
 	warmCaches(m, true)
-	m.promptQueue = 1
-	m.promptQueueItems = []string{"a"}
+	m.promptQueue.SetFetched([]string{"a"})
 	m.textarea.SetValue("draft")
 	ws.resetCounters()
 
@@ -2240,12 +2218,11 @@ func TestBusyEscapeDrainIsSingleFlightAcrossTheBusyEdge(t *testing.T) {
 	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.True(t, m.isCanceling)
 
-	// Confirming press: cancels and dispatches the drain.
+	// Confirming press: dispatches the drain, which cancels after it.
 	_, confirm := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	require.Equal(t, 1, ws.cancelCalls)
 	require.True(t, m.queueClearInFlight)
 
-	// The cancel lands: the session now reads idle while the drain is still
+	// The turn ends: the session now reads idle while the drain is still
 	// out, which is what routes the next press to the idle branch.
 	ws.agentBusy = false
 	m.agentBusyCache.set(false)
@@ -2257,6 +2234,7 @@ func TestBusyEscapeDrainIsSingleFlightAcrossTheBusyEdge(t *testing.T) {
 	runCmds(m, third)
 
 	require.Equal(t, 1, ws.clearQueueCalls, "the gesture must drain exactly once")
+	require.Equal(t, 1, ws.cancelCalls, "the gesture must cancel exactly once")
 	require.False(t, m.queueClearInFlight)
 	require.Equal(t, "a\n\ndraft", m.textarea.Value())
 	require.Equal(t, "Queued messages moved to the input field.", m.status.msg.Msg)

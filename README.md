@@ -61,14 +61,18 @@ go install -tags sqlite3_dotlk github.com/charmbracelet/crush@latest
 
 ## Getting Started
 
-The quickest way to get started is to choose a [Hyper][hyper] model from model
-picker. Follow the steps to authenticate and you'll be good to go.
-
-[Hyper], from Charm, is the official Crush provider. It’s subscription-based
-and optimized for Crush. It’s privacy focused, with zero data retention (ZDR)
-and is designed to comply with GDPR. [More on Hyper][hyper].
+The quickest way to get started is to choose a [Hyper][hyper] model from the 
+little model picker. Follow the steps to authenticate and you're ready to go.
 
 <p><a href="https://hyper.charm.land"><img width="340" height="200" alt="Charm Hyper" src="https://github.com/user-attachments/assets/50875289-7992-454d-9f14-9f790413fb5e" /></a></p>
+
+[Hyper][hyper], from Charm, is the official model provider for Crush. It’s 
+built  on open-weight models and is optimized for Crush, with an emphasis 
+on high-quality inference. There are subscription and prepaid options, including zero data retention 
+(ZDR). It's also GDPR compliant!
+
+[More on Hyper][hyper].
+
 
 ## API Keys
 
@@ -186,6 +190,7 @@ considered deprecated. See: [the config docs](./docs/config/) for details.
 >
 > - `CRUSH_GLOBAL_CONFIG`
 > - `CRUSH_GLOBAL_DATA`
+> - `CRUSH_DATA_DIR` (overrides the per-project `.crush` directory)
 
 ### Web Search
 
@@ -244,6 +249,14 @@ You can also override the configured prompt for a single run with
 crush --sys-prompt /path/to/system-prompt.md
 crush -p /path/to/system-prompt.md run "review this change"
 ```
+
+These settings replace only the body of the built-in coder prompt. Crush still
+adds its own sections for the environment, LSP, skills, and context files.
+`option prompt coder` (or `options.prompts.coder`) and `--prompt coder=<path>`
+are different: they replace the whole coder template (see
+[the config docs](./docs/config/README.md#option-prompt)). A replacement
+template keeps the body (yours or the default) only if it includes
+`{{.SystemPrompt}}`.
 
 ### Environment Variables
 
@@ -316,6 +329,9 @@ dialog.
 | Charmtone Pantera | `charmtone-panther` (default) |
 | Gruvbox Dark      | `gruvbox-dark`                |
 | Keanu             | `keanu`                       |
+| Rosé Pine         | `rose-pine`                   |
+| Rosé Pine Moon    | `rose-pine-moon`              |
+| Rosé Pine Dawn    | `rose-pine-dawn`              |
 
 ### LSPs
 
@@ -494,6 +510,13 @@ permissions. Use this with care.
 permissions allow view ls grep edit mcp_context7_get-library-doc
 ```
 
+The `bash` tool additionally runs a small set of read-only commands (`ls`,
+`pwd`, `git status`, `git log`, …) without prompting. Crush parses the command
+to decide, so it applies only when the whole command is provably inert: a
+redirection, a variable assignment, a command substitution, a pipeline, or an
+argument that mutates state (`git branch -D`, `git remote set-url`) all fall
+back to the normal permission prompt.
+
 ### Disabling Built-In Tools
 
 You can also deny tools, hiding then from the agent entirely:
@@ -660,11 +683,15 @@ Crush supports custom provider configurations for both OpenAI-compatible and
 Anthropic-compatible APIs.
 
 > [!NOTE]
-> Note that we support two "types" for OpenAI. Make sure to choose the right one
-> to ensure the best experience!
+> The provider type describes the API format the provider speaks. Make sure
+> to choose the right one to ensure the best experience!
 >
-> - `openai` should be used when proxying or routing requests through OpenAI.
-> - `openai-compat` should be used when using non-OpenAI providers that have OpenAI-compatible APIs.
+> - `responses` should be used when proxying or routing requests through OpenAI.
+> - `completions` should be used when using non-OpenAI providers that have OpenAI-compatible APIs.
+> - `messages` should be used for Anthropic-compatible APIs.
+>
+> Legacy values (`openai`, `openai-compat`, `anthropic`) are still accepted and
+> migrated automatically.
 
 #### OpenAI-Compatible APIs
 
@@ -672,7 +699,7 @@ Here’s an example configuration for Deepseek, which uses an OpenAI-compatible
 API. Don't forget to set `DEEPSEEK_API_KEY` in your environment.
 
 ```bash
-provider add deepseek --type openai-compat \
+provider add deepseek --type completions \
   --base-url "https://api.deepseek.com/v1" \
   --api-key "$DEEPSEEK_API_KEY"
 
@@ -692,7 +719,7 @@ Custom Anthropic-compatible providers follow this format:
 
 ```bash
 provider add custom-anthropic \
-  --type anthropic \
+  --type messages \
   --base-url "https://api.anthropic.com/v1" \
   --api-key "$ANTHROPIC_API_KEY" \
   --extra-header anthropic-version 2023-06-01
@@ -701,7 +728,7 @@ model add custom-anthropic/claude-sonnet-4-20250514 \
   --name "Claude Sonnet 4" \
   --context-window 200000 \
   --default-max-tokens 50000 \
-  --can-reason true \
+  --thinking toggleable \
   --supports-images true \
   --price-input 3 \
   --price-output 15 \
@@ -762,13 +789,13 @@ To add specific models to the configuration, configure as such:
 
 ```bash
 # crushrc — authentication still comes from gcloud and the VERTEXAI_* env vars.
-provider add vertexai --type google-vertex
+provider add vertexai
 
 model add vertexai/claude-sonnet-4@20250514 \
   --name "VertexAI Sonnet 4" \
   --context-window 200000 \
   --default-max-tokens 50000 \
-  --can-reason true \
+  --thinking toggleable \
   --supports-images true \
   --price-input 3 \
   --price-output 15 \
@@ -917,8 +944,12 @@ collected.
 Details on exactly what’s collected are in the source code ([here](https://github.com/charmbracelet/crush/tree/main/internal/event)
 and [here](https://github.com/charmbracelet/crush/blob/main/internal/llm/agent/event.go)).
 
-You can opt out of metrics collection at any time by setting the environment
-variable by setting the following in your environment:
+Also, when you use Crush with [Hyper][hyper], your Crush usage metrics may 
+be associated with your Hyper account to help us improve the service and
+diagnose issues. For more information, see [the Hyper Privacy Policy](https://hyper.charm.land/legal/privacy-policy).
+
+Either way, you can opt out of metrics collection at any time by setting 
+the following  in your environment:
 
 ```bash
 export CRUSH_DISABLE_METRICS=1

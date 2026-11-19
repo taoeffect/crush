@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/stretchr/testify/require"
@@ -54,16 +54,18 @@ func TestRealCopilotModelsClientGetMapsModelsAndSendsHeaders(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, catwalk.InferenceProviderCopilot, provider.ID)
 	require.Equal(t, server.URL, provider.APIEndpoint)
-	require.Equal(t, catwalk.TypeOpenAICompat, provider.Type)
+	require.Equal(t, catwalk.TypeCompletions, provider.Type)
 	require.Equal(t, []catwalk.Model{
 		{
 			ID:               "claude-sonnet-4.6",
 			Name:             "Claude Sonnet 4.6",
 			ContextWindow:    264000,
 			DefaultMaxTokens: 64000,
-			CanReason:        true,
-			ReasoningLevels:  []string{"low", "medium", "high"},
-			SupportsImages:   true,
+			Reasoning: catwalk.Reasoning{
+				Thinking:     catwalk.ThinkingToggleable,
+				EffortLevels: catwalk.NewEffortLevels("low", "medium", "high"),
+			},
+			Capabilities: catwalk.Capabilities{Vision: true},
 		},
 	}, provider.Models)
 }
@@ -113,7 +115,13 @@ func TestRealCopilotModelsClientGetRefreshesExpiredOAuthToken(t *testing.T) {
 	provider, err := client.Get(t.Context())
 
 	require.NoError(t, err)
-	require.Equal(t, []catwalk.Model{{ID: "gpt-5.1", Name: "GPT 5.1", ContextWindow: 128000, DefaultMaxTokens: 16000}}, provider.Models)
+	require.Equal(t, []catwalk.Model{{
+		ID:               "gpt-5.1",
+		Name:             "GPT 5.1",
+		ContextWindow:    128000,
+		DefaultMaxTokens: 16000,
+		Reasoning:        catwalk.Reasoning{Thinking: catwalk.ThinkingNever},
+	}}, provider.Models)
 	require.Equal(t, "refreshed-token", client.apiKey)
 }
 
@@ -175,21 +183,25 @@ func TestCopilotModelsToCatwalkModelsFiltersAndDeduplicates(t *testing.T) {
 
 	require.Equal(t, []catwalk.Model{
 		{
-			ID:   "aliased-model",
-			Name: "Aliased Model",
+			ID:        "aliased-model",
+			Name:      "Aliased Model",
+			Reasoning: catwalk.Reasoning{Thinking: catwalk.ThinkingNever},
 		},
 		{
 			ID:               "gpt-5.1",
 			Name:             "GPT 5.1",
 			ContextWindow:    128000,
 			DefaultMaxTokens: 16000,
-			CanReason:        true,
-			ReasoningLevels:  []string{"low", "medium", "high"},
-			SupportsImages:   true,
+			Reasoning: catwalk.Reasoning{
+				Thinking:     catwalk.ThinkingToggleable,
+				EffortLevels: catwalk.NewEffortLevels("low", "medium", "high"),
+			},
+			Capabilities: catwalk.Capabilities{Vision: true},
 		},
 		{
-			ID:   "unaliased-model-2026-01-01",
-			Name: "Unaliased Dated Model",
+			ID:        "unaliased-model-2026-01-01",
+			Name:      "Unaliased Dated Model",
+			Reasoning: catwalk.Reasoning{Thinking: catwalk.ThinkingNever},
 		},
 	}, models)
 }

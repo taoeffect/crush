@@ -28,7 +28,7 @@ type NewSessionToolRenderContext struct{}
 // RenderTool implements the [ToolRenderer] interface.
 func (r *NewSessionToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
-	if opts.IsPending() {
+	if opts.IsStreamingInput() {
 		return pendingTool(sty, "New Session", opts.Anim, false)
 	}
 

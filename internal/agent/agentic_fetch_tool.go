@@ -134,7 +134,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 					fullPrompt = fmt.Sprintf("%s\n\nWeb page URL: %s\n\n<webpage_content>\n%s\n</webpage_content>", params.Prompt, params.URL, content)
 				}
 			} else {
-				// Search mode: let the sub-agent search and fetch as needed.
+				// Search mode: let the subagent search and fetch as needed.
 				fullPrompt = fmt.Sprintf("%s\n\nUse the web_search tool to find relevant information. Break down the question into smaller, focused searches if needed. After searching, use web_fetch to get detailed content from the most relevant results.", params.Prompt)
 			}
 
@@ -182,7 +182,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, nil, tmpDir),
 			}
 
-			// Sub-agent tools run without hook interception. The top-level
+			// Subagent tools run without hook interception. The top-level
 			// `agentic_fetch` call itself is already wrapped from the coder's
 			// side; firing hooks again for every inner tool call would run
 			// the user's hooks N times per delegated turn.
@@ -190,16 +190,18 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 			agent := NewSessionAgent(SessionAgentOptions{
 				Models:               func() ModelSet { return ModelSet{Large: small, Small: small} },
 				SystemPrompt:         systemPrompt,
+				Cfg:                  c.cfg,
+				Prompts:              c.promptTexts,
 				DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
-				IsYolo:               c.permissions.SkipRequests(),
 				Sessions:             c.sessions,
 				Messages:             c.messages,
 				Tools:                fetchTools,
 				Permissions:          c.permissions,
 				Ownership:            c.ownership,
+				titles:               &c.titles,
 			})
 
-			return c.runSubAgent(ctx, subAgentParams{
+			return c.runSubAgentMaybeBackground(ctx, tools.AgenticFetchToolName, accessRead, subAgentParams{
 				Agent:          agent,
 				Models:         models,
 				SessionID:      validationResult.SessionID,

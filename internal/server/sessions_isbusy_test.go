@@ -50,6 +50,7 @@ func (s *stubCoordinator) ClearQueue(string) []agent.QueuedMessage { return nil 
 func (s *stubCoordinator) PopQueuedMessage(string) (agent.QueuedMessage, bool) {
 	return agent.QueuedMessage{}, false
 }
+func (s *stubCoordinator) AddNote(string, string) {}
 
 func (s *stubCoordinator) Summarize(context.Context, string) error {
 	return nil
@@ -58,6 +59,8 @@ func (s *stubCoordinator) Model() agent.Model                            { retur
 func (s *stubCoordinator) UpdateModels(context.Context) error            { return nil }
 func (s *stubCoordinator) SetMainAgent(string) error                     { return nil }
 func (s *stubCoordinator) GenerateTitle(context.Context, string, string) {}
+func (s *stubCoordinator) SetHostContext(proto.HostContext)              {}
+func (s *stubCoordinator) HostContext() proto.HostContext                { return proto.HostContext{} }
 
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the

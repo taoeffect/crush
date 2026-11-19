@@ -100,7 +100,7 @@ func TestSummarize_OwnsSessionBeforeItReadsTheTranscript(t *testing.T) {
 		t.Fatal("summarize never reached the transcript read")
 	}
 
-	require.True(t, sa.IsSessionBusy(sess.ID),
+	require.True(t, sa.HasActiveTurn(sess.ID),
 		"the summarize must own the session before it reads the transcript")
 
 	result, runErr := sa.Run(t.Context(), SessionAgentCall{
@@ -116,7 +116,7 @@ func TestSummarize_OwnsSessionBeforeItReadsTheTranscript(t *testing.T) {
 
 	// The summarize handed the session on to the queued prompt and both
 	// have finished, so nothing owns the session any more.
-	require.False(t, sa.IsSessionBusy(sess.ID))
+	require.False(t, sa.HasActiveTurn(sess.ID))
 	require.Equal(t, 0, sa.QueuedPrompts(sess.ID))
 }
 
@@ -172,7 +172,7 @@ func TestSummarize_IsCancellableBeforeItStreams(t *testing.T) {
 	after, err := env.sessions.Get(t.Context(), sess.ID)
 	require.NoError(t, err)
 	require.Empty(t, after.SummaryMessageID, "a cancelled summarize must not record a summary")
-	require.False(t, sa.IsSessionBusy(sess.ID))
+	require.False(t, sa.HasActiveTurn(sess.ID))
 }
 
 // TestRun_InTurnSummarizeKeepsSessionOwnedByTheTurn pins Defect E for the
@@ -232,7 +232,7 @@ func TestRun_InTurnSummarizeKeepsSessionOwnedByTheTurn(t *testing.T) {
 		t.Fatal("the turn never reached its in-turn summarize")
 	}
 
-	require.True(t, sa.IsSessionBusy(sess.ID),
+	require.True(t, sa.HasActiveTurn(sess.ID),
 		"the turn must still own the session while its auto-compaction reads the transcript")
 
 	result, err := sa.Run(t.Context(), SessionAgentCall{
@@ -252,6 +252,6 @@ func TestRun_InTurnSummarizeKeepsSessionOwnedByTheTurn(t *testing.T) {
 
 	// The turn's end-of-turn handoff ran the queued follow-up, so the
 	// session is idle and the queue is empty.
-	require.False(t, sa.IsSessionBusy(sess.ID))
+	require.False(t, sa.HasActiveTurn(sess.ID))
 	require.Equal(t, 0, sa.QueuedPrompts(sess.ID))
 }

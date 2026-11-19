@@ -57,11 +57,14 @@ func (c *errorCoordinator) ClearQueue(string) []agent.QueuedMessage           { 
 func (c *errorCoordinator) PopQueuedMessage(string) (agent.QueuedMessage, bool) {
 	return agent.QueuedMessage{}, false
 }
+func (c *errorCoordinator) AddNote(string, string)                        {}
 func (c *errorCoordinator) Summarize(context.Context, string) error       { return nil }
 func (c *errorCoordinator) Model() agent.Model                            { return agent.Model{} }
 func (c *errorCoordinator) UpdateModels(context.Context) error            { return nil }
 func (c *errorCoordinator) GenerateTitle(context.Context, string, string) {}
 func (c *errorCoordinator) SetMainAgent(string) error                     { return nil }
+func (c *errorCoordinator) SetHostContext(proto.HostContext)              {}
+func (c *errorCoordinator) HostContext() proto.HostContext                { return proto.HostContext{} }
 
 // insertRunCompleteWorkspace installs a workspace backed by a real
 // app.App (so the runCompletions broker exists) with the given

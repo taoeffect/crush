@@ -26,7 +26,7 @@ type WebSearchOptions struct {
 	KagiAPIKey    string
 }
 
-// NewWebSearchTool creates a web search tool for sub-agents (no permissions needed).
+// NewWebSearchTool creates a web search tool for subagents (no permissions needed).
 func NewWebSearchTool(client *http.Client, opts WebSearchOptions) fantasy.AgentTool {
 	if client == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()

@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
@@ -31,7 +32,7 @@ func TestSummaryMessageLifecycleIntegration(t *testing.T) {
 	sess, err := session.NewService(q, conn).Create(ctx, "test")
 	require.NoError(t, err)
 
-	// Zero debounce so every Update publishes synchronously.
+	// Zero debounce so every Update publishes at once.
 	svc := message.NewService(q, message.WithDebounce(0))
 	ch := svc.Subscribe(ctx)
 
@@ -46,7 +47,7 @@ func TestSummaryMessageLifecycleIntegration(t *testing.T) {
 			if hev := Translate(ev); hev != nil {
 				c.HandleEvent(hev)
 			}
-		default:
+		case <-time.After(time.Second):
 			t.Fatal("expected a published message event")
 		}
 	}
@@ -117,7 +118,7 @@ func TestUserMessageRunStartedIntegration(t *testing.T) {
 			if hev := Translate(ev); hev != nil {
 				c.HandleEvent(hev)
 			}
-		default:
+		case <-time.After(time.Second):
 			t.Fatal("expected a published message event")
 		}
 	}
@@ -198,7 +199,7 @@ func TestSessionTitleChangeIntegration(t *testing.T) {
 			if hev := Translate(ev); hev != nil {
 				c.HandleEvent(hev)
 			}
-		default:
+		case <-time.After(time.Second):
 			t.Fatal("expected a published session event")
 		}
 	}
@@ -239,7 +240,7 @@ func TestPermissionRequestPublishOrderIntegration(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
-	svc := permission.NewPermissionService(dir, false, nil, nil)
+	svc := permission.NewPermissionService(dir, nil, nil)
 	requests := svc.Subscribe(ctx)
 	notifications := svc.SubscribeNotifications(ctx)
 

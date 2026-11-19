@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -170,7 +170,6 @@ func TestRun_ModelChangeDuringTurnDoesNotAffectIt(t *testing.T) {
 		Models:               workspaceModels.Get,
 		SystemPrompt:         "system",
 		DisableContextStatus: true,
-		IsYolo:               true,
 		Sessions:             env.sessions,
 		Messages:             env.messages,
 		Tools:                []fantasy.AgentTool{swap},

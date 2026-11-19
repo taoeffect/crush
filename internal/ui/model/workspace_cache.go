@@ -10,7 +10,7 @@ package model
 // yolo and ready/model caches synchronously so the first frame has values to
 // render; Init then refreshes them off-thread.)
 //
-//   - Reads (isAgentBusy, yoloModeCached, promptQueue, selectedLargeModel,
+//   - Reads (isAgentBusy, permModeCached, promptQueue, selectedLargeModel,
 //     lspInfo) always return the memoized value, stale or not.
 //   - State edges (message created, agent finished/errored, prompt
 //     submitted, cancel, session switch, yolo toggle, model change, LSP
@@ -36,6 +36,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/crush/internal/workspace"
 )
@@ -71,6 +72,29 @@ func (c *ttlCache) invalidate() {
 	c.at = time.Time{}
 }
 
+// modeTTLCache memoizes one permission-mode workspace probe result.
+type modeTTLCache struct {
+	val permission.PermissionMode
+	at  time.Time
+}
+
+// fresh reports whether the cached value is within its TTL.
+func (c *modeTTLCache) fresh(ttl time.Duration) bool {
+	return !c.at.IsZero() && time.Since(c.at) < ttl
+}
+
+// set writes a known-good value through the cache.
+func (c *modeTTLCache) set(val permission.PermissionMode) {
+	c.val = val
+	c.at = time.Now()
+}
+
+// invalidate marks the value stale so the next Update-tail backstop
+// re-probes; the last value keeps being served in the meantime.
+func (c *modeTTLCache) invalidate() {
+	c.at = time.Time{}
+}
+
 // busyStateMsg delivers the result of an off-thread busy/permission probe.
 type busyStateMsg struct {
 	// gen is the busy generation captured when the probe was dispatched.
@@ -81,7 +105,7 @@ type busyStateMsg struct {
 	gen       uint64
 	ready     bool
 	agentBusy bool
-	yolo      bool
+	permMode  permission.PermissionMode
 	// forSession is the session sessionBusy was probed for.
 	forSession string
 	// sessionBusy reports whether forSession itself has a run in flight,
@@ -109,6 +133,8 @@ type promptQueueMsg struct {
 // rejected prompt gets no RunComplete, so err must end its turn.
 type agentRunSubmittedMsg struct {
 	sessionID string
+	// pendingID is the optimistic queue entry for the prompt, or zero.
+	pendingID uint64
 	err       error
 }
 
@@ -130,7 +156,9 @@ type promptQueueClearedMsg struct {
 	// restore reports whether the drained prompts belong back in the
 	// input field or are a deliberate discard (commands dialog).
 	restore bool
-	err     error
+	// canceled reports that the turn was cancelled after the drain.
+	canceled bool
+	err      error
 }
 
 // agentModelChangedMsg reports that the coordinator's model was updated
@@ -158,7 +186,7 @@ func (m *UI) currentSessionID() string {
 // state.
 func (m *UI) invalidateBusyCaches() {
 	m.agentBusyCache.invalidate()
-	m.yoloCache.invalidate()
+	m.permModeCache.invalidate()
 	m.busyFetchGen++
 }
 
@@ -192,7 +220,7 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 				st.sessionBusy = ws.AgentIsSessionBusy(sessionID)
 			}
 		}
-		st.yolo = ws.PermissionSkipRequests()
+		st.permMode = ws.PermissionMode()
 		return st
 	}
 }
@@ -222,17 +250,17 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 		return nil
 	}
 	prevBusy := m.isAgentBusy()
-	prevYolo := m.yoloModeCached()
+	prevMode := m.permModeCached()
 	m.agentBusyCache.set(msg.agentBusy)
-	m.yoloCache.set(msg.yolo)
+	m.permModeCache.set(msg.permMode)
 	m.agentReady = msg.ready
 	m.agentModel = msg.model
-	if prevYolo != msg.yolo {
-		// A remote/async toggle changed yolo mode: update the editor
-		// prompt function so the prompt icon/style tracks the new mode.
-		// The cache is written above and the placeholder is refreshed by
-		// the Update tail.
-		m.setEditorPrompt(msg.yolo)
+	if prevMode != msg.permMode {
+		// A remote/async toggle changed the permission mode: update the
+		// editor prompt function so the prompt icon/style tracks the new
+		// mode. The cache is written above and the placeholder is refreshed
+		// by the Update tail.
+		m.setEditorPrompt(msg.permMode)
 	}
 
 	var cmds []tea.Cmd
@@ -243,7 +271,7 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 		// the agent is working. The authoritative probe re-enables it so
 		// freshly rendered spinners tick. When the probe reports idle the
 		// reload gate stands, keeping ghost spinners still.
-		m.chat.SetAnimationsAllowed(true)
+		m.animClock.frozen = false
 	}
 	if m.hasSession() && hasInProgressTodo(m.session.Todos) && busy && !m.todoIsSpinning {
 		m.todoIsSpinning = true
@@ -254,10 +282,23 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 	}
 	m.probedSession = msg.forSession
 	m.probedSessionBusy = msg.sessionBusy
+	if msg.ready && msg.forSession != "" && msg.forSession == m.currentSessionID() && !msg.sessionBusy {
+		m.dropSettledPrompts()
+	}
 	if prevBusy != busy {
 		m.renderPills()
 	}
 	return cmds
+}
+
+// dropSettledPrompts takes the settled submissions off the queue pill. See
+// promptQueue.DropSettled.
+func (m *UI) dropSettledPrompts() {
+	shown := m.promptQueue.Shown()
+	m.promptQueue.DropSettled()
+	if m.promptQueue.Shown() != shown {
+		m.updateLayoutAndSize()
+	}
 }
 
 // dispatchPromptQueueRefresh returns a command that fetches the queued
@@ -269,14 +310,14 @@ func (m *UI) dispatchPromptQueueRefresh() tea.Cmd {
 		return nil
 	}
 	if !m.hasSession() {
-		m.promptQueueItems = nil
 		m.promptQueueCheckedAt = time.Now()
 		// Bump the generation so any in-flight fetch scoped to the
 		// now-departed session is discarded rather than repopulating the
 		// queue.
 		m.invalidatePromptQueue()
-		if m.promptQueue != 0 {
-			m.promptQueue = 0
+		prev := m.promptQueue.Shown()
+		m.promptQueue.Reset()
+		if prev != 0 {
 			m.updateLayoutAndSize()
 		}
 		return nil
@@ -309,10 +350,17 @@ func (m *UI) applyPromptQueue(msg promptQueueMsg) []tea.Cmd {
 		return nil
 	}
 	m.promptQueueCheckedAt = time.Now()
-	itemsChanged := !slices.Equal(m.promptQueueItems, msg.prompts)
-	countChanged := len(msg.prompts) != m.promptQueue
-	m.promptQueueItems = msg.prompts
-	m.promptQueue = len(msg.prompts)
+	prevItems := m.promptQueue.Items()
+	m.promptQueue.SetFetched(msg.prompts)
+	itemsChanged := !slices.Equal(prevItems, m.promptQueue.Items())
+	countChanged := len(prevItems) != m.promptQueue.Shown()
+	// A report waits in the queue until the model reads it, but its
+	// subagent is already done.
+	for _, prompt := range msg.prompts {
+		if report, ok := message.ParseSubAgentReportPrompt(prompt); ok {
+			m.markDispatchReported(report.Label)
+		}
+	}
 	if countChanged {
 		m.updateLayoutAndSize()
 	} else if itemsChanged {
@@ -331,7 +379,7 @@ func (m *UI) popQueuedMessage() tea.Cmd {
 	if m.queuedPopInFlight {
 		return nil
 	}
-	if m.promptQueue == 0 {
+	if m.promptQueue.Shown() == 0 {
 		return util.ReportInfo(noQueuedMessages)
 	}
 	if !m.hasSession() || m.com == nil || m.com.Workspace == nil {
@@ -394,10 +442,7 @@ func (m *UI) applyQueuedMessagePop(msg queuedMessagePoppedMsg) []tea.Cmd {
 	cmds := m.restoreQueuedMessages([]agent.QueuedMessage{msg.message})
 
 	m.invalidatePromptQueue()
-	if len(m.promptQueueItems) > 0 {
-		m.promptQueueItems = m.promptQueueItems[:len(m.promptQueueItems)-1]
-	}
-	m.promptQueue = len(m.promptQueueItems)
+	m.promptQueue.Remove(msg.message.Prompt)
 	m.promptQueueCheckedAt = time.Now()
 	m.updateLayoutAndSize()
 
@@ -409,7 +454,9 @@ func (m *UI) applyQueuedMessagePop(msg queuedMessagePoppedMsg) []tea.Cmd {
 
 // clearQueuedMessages drains the session's queued prompts off the Update
 // goroutine; restore says whether they return to the editor or are dropped.
-func (m *UI) clearQueuedMessages(restore bool) tea.Cmd {
+// With cancel set it then cancels the turn: a server cancel drops the
+// queued prompts it covers, so the drain must come first.
+func (m *UI) clearQueuedMessages(restore, cancel bool) tea.Cmd {
 	if m.queueClearInFlight {
 		return nil
 	}
@@ -421,10 +468,14 @@ func (m *UI) clearQueuedMessages(restore bool) tea.Cmd {
 	sessionID := m.session.ID
 	return func() tea.Msg {
 		messages, err := ws.AgentClearQueue(sessionID)
+		if cancel {
+			ws.AgentCancel(sessionID)
+		}
 		return promptQueueClearedMsg{
 			forSession: sessionID,
 			messages:   messages,
 			restore:    restore,
+			canceled:   cancel,
 			err:        err,
 		}
 	}
@@ -463,9 +514,8 @@ func (m *UI) applyPromptQueueCleared(msg promptQueueClearedMsg) []tea.Cmd {
 	// Bump the generation so a fetch started before the drain cannot land
 	// and repopulate the pill it just emptied.
 	m.invalidatePromptQueue()
-	hadQueue := m.promptQueue > 0 || len(m.promptQueueItems) > 0
-	m.promptQueueItems = nil
-	m.promptQueue = 0
+	hadQueue := m.promptQueue.Shown() > 0
+	m.promptQueue.ClearServer()
 	m.promptQueueCheckedAt = time.Now()
 	if hadQueue {
 		m.updateLayoutAndSize()
@@ -586,7 +636,7 @@ func (m *UI) staleWorkspaceRefreshCmds() []tea.Cmd {
 		return nil
 	}
 	var cmds []tea.Cmd
-	if !m.agentBusyCache.fresh(busyCacheTTL) || !m.yoloCache.fresh(busyCacheTTL) {
+	if !m.agentBusyCache.fresh(busyCacheTTL) || !m.permModeCache.fresh(busyCacheTTL) {
 		if cmd := m.dispatchBusyRefresh(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -609,30 +659,16 @@ func (m *UI) staleWorkspaceRefreshCmds() []tea.Cmd {
 	return cmds
 }
 
-// toggleYoloMode flips permission auto-approval and writes the new value
-// through the yolo cache (no re-probe needed) and the editor prompt. Shared
-// by the direct keybinding and the commands-dialog action so both stay
-// write-through. Returns the new mode.
-func (m *UI) toggleYoloMode() bool {
-	yolo := !m.com.Workspace.PermissionSkipRequests()
-	m.com.Workspace.PermissionSetSkipRequests(yolo)
-	m.yoloCache.set(yolo)
-	// Supersede any in-flight busy/yolo probe: its result carries the old
-	// generation and would otherwise overwrite the value we just wrote.
-	// Bump the generation (rather than invalidateBusyCaches, which would
-	// clear the fresh value) so applyBusyState's guard discards and
-	// re-dispatches the stale probe.
-	m.busyFetchGen++
-	m.setEditorPrompt(yolo)
-	// Any explicit toggle hands YOLO ownership back to the user; the
-	// Shift+Tab cycle re-claims it right after its own call.
-	m.cycleYolo = false
-	return yolo
+// permModeCached reports the memoized permission mode. Toggles write
+// through the cache; the Update-tail backstop keeps it bounded-stale
+// otherwise.
+func (m *UI) permModeCached() permission.PermissionMode {
+	return m.permModeCache.val
 }
 
-// yoloModeCached reports the memoized permission-skip ("yolo") mode. Toggles
-// write through the cache; the Update-tail backstop keeps it bounded-stale
-// otherwise.
-func (m *UI) yoloModeCached() bool {
-	return m.yoloCache.val
+// yoloActive reports whether the memoized permission mode skips permission
+// prompts. Sysadmin skips them too, differing from yolo only in dropping the
+// exec-time block list, which the input-mode cycle has no stake in.
+func (m *UI) yoloActive() bool {
+	return m.permModeCached() != permission.PermissionModeNormal
 }

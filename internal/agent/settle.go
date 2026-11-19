@@ -15,19 +15,19 @@ import (
 const interruptedToolCallResult = "tool call was interrupted and did not produce a result, you may retry this call if the result is still needed"
 
 // toolResultsForCalls builds the tool message that must immediately follow
-// an assistant message with tool calls. Results are taken from
-// toolResultsByCall and consumed, so a result stored alongside results for
+// an assistant message with tool calls. toolResultsByCall holds one result
+// per call and is consumed, so a result stored alongside results for
 // other assistants is emitted once, next to the call that asked for it. A
 // call with no stored result gets a synthetic one; the in-turn finalize and
 // RepairInterruptedSession should have made that impossible, so it is
 // logged as a warning.
-func toolResultsForCalls(m message.Message, toolResultsByCall map[string][]fantasy.MessagePart) fantasy.Message {
+func toolResultsForCalls(m message.Message, toolResultsByCall map[string]fantasy.ToolResultPart) fantasy.Message {
 	content := make([]fantasy.MessagePart, 0, len(m.ToolCalls()))
 	for _, tc := range m.ToolCalls() {
-		parts := toolResultsByCall[tc.ID]
+		result, ok := toolResultsByCall[tc.ID]
 		delete(toolResultsByCall, tc.ID)
-		if len(parts) > 0 {
-			content = append(content, parts...)
+		if ok {
+			content = append(content, result)
 			continue
 		}
 		slog.Warn(
@@ -51,8 +51,9 @@ func toolResultsForCalls(m message.Message, toolResultsByCall map[string][]fanta
 // ListSettledMessages returns a session's transcript after
 // RepairInterruptedSession has given a terminal state to any turn a dead
 // run left behind. It holds the session's dispatch lock throughout, so a
-// run cannot start between the busy check and the repair. IsSessionBusy
-// only reads activeRequests and takes no lock, so it is safe to call here.
+// run on this agent cannot start between the busy check and the repair.
+// HasActiveTurn only reads activeRequests and takes no lock, so it is
+// safe to call here.
 func (a *sessionAgent) ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
 	mu := a.sessionMu(sessionID)
 	mu.Lock()
@@ -61,11 +62,28 @@ func (a *sessionAgent) ListSettledMessages(ctx context.Context, sessionID string
 	if err := a.messages.FlushAll(ctx); err != nil {
 		return nil, err
 	}
-	if !a.IsSessionBusy(sessionID) {
+	if !a.HasActiveTurn(sessionID) {
 		if err := RepairInterruptedSession(ctx, a.messages, sessionID); err != nil {
 			// The repair may have stopped halfway; return what is stored.
 			slog.Warn("Failed to repair interrupted session", "session_id", sessionID, "error", err)
 		}
 	}
 	return a.messages.List(ctx, sessionID)
+}
+
+// ListSettledMessages returns a session's transcript with any turn a dead
+// process left behind repaired. Readers are serialized so two cannot
+// repair the same turn twice. A session busy anywhere in this coordinator,
+// subagents included, is returned as stored: its open turn is not dead.
+func (c *coordinator) ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
+	c.settleMu.Lock()
+	defer c.settleMu.Unlock()
+
+	if c.IsSessionBusy(sessionID) {
+		if err := c.messages.FlushAll(ctx); err != nil {
+			return nil, err
+		}
+		return c.messages.List(ctx, sessionID)
+	}
+	return c.currentAgent().ListSettledMessages(ctx, sessionID)
 }
